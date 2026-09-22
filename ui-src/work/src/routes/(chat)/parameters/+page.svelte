@@ -415,7 +415,8 @@
 						</div>
 					</dl>
 					<p class="mt-3 text-xs text-muted-foreground">
-						Estimated: weights (GGUF size) + KV cache (0.04 GB/tok × n_ctx × KV-precision factor) +
+						Estimated: weights (GGUF size) + KV cache (real per-layer structure, corrected for
+						hybrid-attention models) + compute buffer (logits + graph scratch, scales with ubatch) +
 						framework overhead (0.3 GB).
 					</p>
 				{/if}

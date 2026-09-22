@@ -39,6 +39,8 @@
 		clampConfigForModel,
 		estimateVram,
 		idleTtlSeconds,
+		KvCacheStore,
+		kvCacheStore,
 		lastModelStore,
 		launchPresetsStore,
 		maxCtxForVram,
@@ -207,67 +209,18 @@
 	 * 而 qwen3.5 / Qwen3-Next 这类**混合线性注意力**模型绝大多数层只存递归状态，
 	 * 实测 qwen3.5-9b 在 32K+q4_0 下 KV 只有 338 MiB，结构公式却给 1130 MiB（**高估近 4 倍**），
 	 * 于是把"全 32 层都能上卡"显示成"99% / 只剩 0.09 GB"。实测值优先。
-	 * 每个 (模型, KV 精度) 只测一次，写 localStorage 长期复用；预演是只读的，不加载模型。
+	 *
+	 * ⚠️ **唯一实现在 `$lib/stores/kv-cache.svelte`**：模型列表的三色徽章也要用同一份
+	 * 数据，两边各存一份会 key 格式漂移，出现"性能页测过了、列表里还按结构式算"的矛盾。
+	 * 下面几个是薄封装，保留是因为本页多处按 (model, ctk) 取值，读起来更顺。
 	 */
-	const LS_KV_MEASURED = 'webui.kvMeasured';
-	let kvMeasured = $state<Record<string, { perTokenKb: number; at: number }>>({});
-	let kvMeasuringFor = $state<string | null>(null);
-
-	function loadKvMeasured() {
-		try {
-			const raw = localStorage.getItem(LS_KV_MEASURED);
-			kvMeasured = raw ? (JSON.parse(raw) as typeof kvMeasured) : {};
-		} catch {
-			kvMeasured = {};
-		}
-	}
-
-	function kvKey(path: string, ctk?: string | null) {
-		return `${path}|${ctk ?? 'f16'}`;
-	}
-
-	/** 该模型该 KV 精度的实测字节/token；没测过返回 null（调用方回退结构估算） */
-	function kvMeasuredBytes(m: ManagerModel | null, ctk?: string | null): number | null {
-		if (!m) return null;
-		const hit = kvMeasured[kvKey(m.path, ctk)];
-		return hit && hit.perTokenKb > 0 ? hit.perTokenKb * 1024 : null;
-	}
-
-	/** 后台测一次显存账本（只读），写入缓存后预测即变准 */
-	async function measureKv(m: ManagerModel, ctk?: string | null) {
-		const key = kvKey(m.path, ctk);
-		if (kvMeasured[key] || kvMeasuringFor === key) return;
-		kvMeasuringFor = key;
-		try {
-			const r = await ManagerService.preflight({
-				model_path: m.path,
-				ctx: 32768,
-				ngl: 99,
-				ctk: ctk ?? 'f16',
-				ctv: ctk ?? 'f16',
-				np: 1,
-				flash_attn: true,
-				batch: 512,
-				ubatch: 128,
-				// 这里只要「该 KV 精度的字节/token」这一个数，关掉自适应降档：
-				// 否则账本会变成降档后档位（q4_0）的值，存进 f16 的键就全错了。
-				auto_ladder: false
-			});
-			const kb = r.per_token_kb ?? r.mem?.per_token_kb ?? null;
-			if (kb && kb > 0) {
-				kvMeasured = { ...kvMeasured, [key]: { perTokenKb: kb, at: Date.now() } };
-				try {
-					localStorage.setItem(LS_KV_MEASURED, JSON.stringify(kvMeasured));
-				} catch {
-					/* 写不进去就只在本次会话有效 */
-				}
-			}
-		} catch {
-			/* 预演失败就继续用结构估算，不打扰用户 */
-		} finally {
-			kvMeasuringFor = null;
-		}
-	}
+	const kvKey = (path: string, ctk?: string | null) => KvCacheStore.key(path, ctk);
+	const kvMeasuredBytes = (m: ManagerModel | null, ctk?: string | null) =>
+		kvCacheStore.bytesFor(m, ctk);
+	const measureKv = (m: ManagerModel, ctk?: string | null) => kvCacheStore.measure(m, ctk);
+	const loadKvMeasured = () => kvCacheStore.load();
+	/** 正在预演的 (模型, 精度)，用来在旁边显示 spinner */
+	const kvMeasuringFor = $derived(kvCacheStore.measuringKey);
 
 	/**
 	 * 轮询 `/health` 等新模型真正加载完，返回是否就绪。
@@ -361,15 +314,7 @@
 				// 用 applied_ctk 而不是用户选的 ctk：自适应降档后账本记的是**实际档位**
 				// 的 KV（q4_0 ≠ f16），按请求值存会把 f16 的实测值也污染成 q4_0 的。
 				const measuredCtk = preflight.applied_ctk ?? ctk;
-				kvMeasured = {
-					...kvMeasured,
-					[kvKey(m.path, measuredCtk)]: { perTokenKb: kb, at: Date.now() }
-				};
-				try {
-					localStorage.setItem(LS_KV_MEASURED, JSON.stringify(kvMeasured));
-				} catch {
-					/* 忽略 */
-				}
+				kvCacheStore.record(m.path, measuredCtk, kb);
 			}
 		} catch (e: unknown) {
 			preflight = {
@@ -1159,7 +1104,7 @@
 
 	/**
 	 * 选中模型 / 切换 KV 精度时，后台补测一次实测口径（只读预演，不加载模型，每组合只测一次）。
-	 * 不阻塞界面：测完写进 kvMeasured，上面的 estimate 会自动重算。
+	 * 不阻塞界面：测完写进实测缓存，上面的 estimate 会自动重算。
 	 */
 	$effect(() => {
 		const m = targetModel;

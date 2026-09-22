@@ -14,7 +14,13 @@
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { ManagerService } from '$lib/services';
 	import type { ManagerFitPlan, ManagerModel } from '$lib/services';
-	import { lastModelStore, launchPresetsStore, normalizeModelKey, serverStore } from '$lib/stores';
+	import {
+		kvCacheStore,
+		lastModelStore,
+		launchPresetsStore,
+		normalizeModelKey,
+		serverStore
+	} from '$lib/stores';
 	import { formatNumber } from '$lib/utils';
 
 	interface Props {
@@ -75,6 +81,16 @@
 				np: cfg.np,
 				ubatch: cfg.ubatch
 			});
+
+			/*
+				把这次的实测 KV 写进共享缓存 —— 模型列表上的三色徽章会立刻从「估算」
+				升级成「实测」，用户不必为了一个数再跑一趟性能页。
+				⚠️ 用 applied_ctk 而不是用户选的 ctk：本预演没关自适应降档，账本记的是
+				降档后档位（q4_0）的 KV，按请求值存会把 f16 的键污染成 q4_0 的值。
+			*/
+			const kb = plan.per_token_kb ?? plan.mem?.per_token_kb ?? null;
+
+			if (kb && kb > 0) kvCacheStore.record(model.path, plan.applied_ctk ?? cfg.ctk, kb);
 		} catch (e: unknown) {
 			predictError = e instanceof Error ? e.message : String(e);
 		} finally {

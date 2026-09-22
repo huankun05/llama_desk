@@ -18,7 +18,17 @@ import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 import { MODEL_SELECTOR_ICON } from '$lib/constants';
 import { ManagerError, ManagerService } from '$lib/services';
 import type { ManagerModel } from '$lib/services';
-import { idleTtlSeconds, lastModelStore, launchPresetsStore, modelsStore, serverStore } from '$lib/stores';
+import { estimateModelFit, fitBadgeDetail } from '$lib/utils/model-fit';
+import type { ModelFitBadge } from '$lib/utils/model-fit';
+import {
+	clampConfigForModel,
+	idleTtlSeconds,
+	kvCacheStore,
+	lastModelStore,
+	launchPresetsStore,
+	modelsStore,
+	serverStore
+} from '$lib/stores';
 import { onMount } from 'svelte';
 
 	interface Props {
@@ -121,6 +131,15 @@ import { onMount } from 'svelte';
 	}
 
 	function isLoaded(m: ManagerModel): boolean {
+		/*
+			⚠️ 哨兵态（零模型）下显存里**没有任何模型**，一律不算「已加载」。
+			不排除这一条的后果（实测截图确认过）：`singleModelName` 在哨兵态会回落到
+			「上次使用的模型」，而下面那个**按名称兜底**的比较会把它判成「已加载」——
+			用户看到 4B 标着「已加载」，以为它正占着显存，其实一个权重都没加载，
+			与 last-model 特性想表达的「未加载 · 下次发消息自动拉起」直接矛盾。
+		*/
+		if (sentinel) return false;
+
 		const lp = norm(loadedPath);
 
 		if (lp) {
@@ -203,9 +222,86 @@ import { onMount } from 'svelte';
 		}
 	}
 
+	// ===== 显存预算与「能不能跑」徽章（路线图 §B.1 / B-L1）=====
+	/**
+	 * GPU 盘点（`/api/gpu-cleanup`，只读）。
+	 *
+	 * 刻意只用这一个接口而不是 `/api/system-metrics`：它同时给出整卡容量、已用量与
+	 * **按进程的占用明细**，一次请求就能推出「桌面占了多少」。该接口后端有 20s 缓存 +
+	 * 后台预热（实测 2.0s → 0.07s），列表打开时拉一次完全无感，且不起任何子进程。
+	 */
+	let gpuTotalGb = $state(0);
+	let gpuUsedGb = $state(0);
+	/** 正在跑的 llama-server 实际占用（从进程明细里挑 active 的） */
+	let instanceVramGb = $state(0);
+
+	async function loadGpu() {
+		try {
+			const r = await ManagerService.gpuCleanupStatus();
+
+			gpuTotalGb = (r.gpu.total_mib ?? 0) / 1024;
+			gpuUsedGb = (r.gpu.used_mib ?? 0) / 1024;
+			instanceVramGb =
+				(r.processes ?? [])
+					.filter((p) => p.kind === 'active')
+					.reduce((sum, p) => sum + (p.vram_mib ?? 0), 0) / 1024;
+		} catch {
+			// 拿不到就把预算留 0 → 徽章显示「无法判定」，绝不瞎猜一个数字给用户
+			gpuTotalGb = 0;
+			gpuUsedGb = 0;
+			instanceVramGb = 0;
+		}
+	}
+
+	/**
+	 * 可用显存预算（GB）= `(整卡容量 − 桌面占用) × 0.90`。
+	 *
+	 * - **桌面占用 = 整卡已用 − 当前实例占用**。这一步不能省：哨兵态（没加载模型）下
+	 *   已用量就是纯桌面占用，实测本机空载被壁纸 + 浏览器 + Electron 吃掉 1.9 GB，
+	 *   拿 8 GB 标称值当预算会把「其实跑得动」的模型误判成红色。
+	 * - **×0.90** 留余量给显存碎片、显示回退与其他程序抖动。
+	 */
+	const budgetGb = $derived.by(() => {
+		if (!gpuTotalGb) return 0;
+
+		const desktopGb = Math.max(0, gpuUsedGb - instanceVramGb);
+
+		return Math.max(0, (gpuTotalGb - desktopGb) * 0.9);
+	});
+
+	/**
+	 * 某一行的可行性判定（**纯计算，不发请求、不起子进程**）。
+	 *
+	 * 方案取该模型自己的：`resolveFor` 会套上该模型专属覆盖，再过 `clampConfigForModel`
+	 * （ctx 夹到模型训练长度、长上下文自动降 KV 精度），这样徽章算的正是「点下去真会
+	 * 下发的那套参数」。KV 若有实测值（性能页预演过）就优先用实测，徽章随之从
+	 * 「估算」升级为「实测」。
+	 */
+	function fitFor(m: ManagerModel): ModelFitBadge | null {
+		const cfg = clampConfigForModel(m, launchPresetsStore.resolveFor(m));
+
+		return estimateModelFit(m, cfg, budgetGb, kvCacheStore.bytesFor(m, cfg.ctk));
+	}
+
+	/**
+	 * 徽章配色：能全层上卡 → 绿、吃紧 → 黄、会掉层 → 红、判不了 → 灰。
+	 *
+	 * 沿用本组件既有「实底 + 白字」的写法（和 Loaded / Last used 一致）：
+	 * 这类徽章在深色与浅色主题下都读得清，不依赖 `dark:` 变体是否启用。
+	 * 注意这与「涨红跌绿」无关 —— 这里是**可用性**语义（绿=跑得动），不是涨跌。
+	 */
+	const FIT_TONE: Record<string, string> = {
+		full: 'bg-emerald-500',
+		tight: 'bg-amber-500',
+		over: 'bg-rose-500',
+		unknown: 'bg-muted-foreground/50'
+	};
+	const fitTone = (fit: ModelFitBadge) => FIT_TONE[fit.level] ?? FIT_TONE.unknown;
+
 	onMount(() => {
 		// 预取一次，点开就是即时列表；失败也不打扰（manager 可能没起）
 		void load();
+		void loadGpu();
 	});
 
 	function moveHighlight(direction: 1 | -1) {
@@ -247,6 +343,10 @@ import { onMount } from 'svelte';
 			phase = 'idle';
 
 			if (models.length === 0) void load();
+
+			// 每次打开都刷一次显存：后端有 20s 缓存，成本极低；而用户可能刚关掉
+			// 某个吃显存的程序，预算变了徽章就该跟着变。
+			void loadGpu();
 
 			requestAnimationFrame(() => searchEl?.focus({ preventScroll: true }));
 		}
@@ -437,6 +537,7 @@ import { onMount } from 'svelte';
 						{#each filtered as m (m.path)}
 							{@const state = rowState(m)}
 							{@const highlighted = highlightedPath === m.path}
+							{@const fit = fitFor(m)}
 							<li class="relative">
 								<!-- 行本体：左键直接装载。已经在跑的那条禁用（换它就是重启，走右侧菜单）。 -->
 								<button
@@ -481,6 +582,21 @@ import { onMount } from 'svelte';
 											<span>· {m.quant}</span>
 											<!-- 显示「实际会用到的 ctx」（方案 + 该模型专属覆盖后），而不是模型的训练上限 -->
 											<span>· ctx {(launchPresetsStore.resolveFor(m).ctx / 1024).toFixed(0)}K</span>
+											<!--
+												「这台机器跑得动吗」徽章（纯前端估算，不加载、不起子进程）。
+												title 里给完整拆解（权重/KV/缓冲、预算、数据来源），
+												鼠标悬停就能看明白结论是怎么来的。
+											-->
+											{#if fit}
+												<span
+													class="shrink-0 rounded-sm px-1 py-px text-[10px] font-medium text-white {fitTone(
+														fit
+													)}"
+													title={fitBadgeDetail(fit)}
+												>
+													{fit.summary}
+												</span>
+											{/if}
 											{#if m.mmproj}
 												<span
 													class="rounded-sm bg-sky-500/20 px-1 py-px text-[10px] font-medium text-sky-500"

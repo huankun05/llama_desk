@@ -229,6 +229,19 @@ export type ModelArch = {
 	k_len: number | null;
 	v_len: number | null;
 	vocab_size: number | null;
+	/**
+	 * **混合线性注意力**架构的分层间隔（qwen35 系）。
+	 *
+	 * 含义：每 N 层里只有 1 层是真注意力（要存完整 KV），其余层只保留一个固定大小的
+	 * 递归状态。实测 qwen3.5-9b 为 4 —— 32 层里只有 8 层真存 KV。
+	 * 没有这个字段时不能把结构公式当准（会高估 n_layer 倍）。
+	 * ⚠️ 老版本 manager 不返回该字段（undefined），此时应降级可信度而不是照旧算。
+	 */
+	full_attention_interval?: number | null;
+	/** 滑窗注意力窗口大小（gemma 系）——用了滑窗就只缓存最近 N 个 token 的 KV */
+	sliding_window?: number | null;
+	/** 跨层共享 KV 的层数（gemma4）——这些层不额外占 KV */
+	shared_kv_layers?: number | null;
 };
 
 /**
@@ -240,12 +253,28 @@ export type ModelArch = {
 const KV_BYTES_PER_ELEM: Record<string, number> = { f16: 2, bf16: 2, q8_0: 34 / 32, q4_0: 18 / 32 };
 
 /**
- * 每 token 的 KV 字节数 = 层数 × KV 头数 × (K 头维 + V 头维) × 每元素字节。
+ * 每 token 的 KV 字节数 = 有效层数 × KV 头数 × (K 头维 + V 头维) × 每元素字节。
  *
  * 必须用真实结构参数算：不同模型的 KV 总量差得极远
  * （实测 MiniCPM5-2B ≈ 42 KB/token、qwen3-4b ≈ 144 KB/token、moondream2 ≈ 192 KB/token），
  * 早先那个「0.04 GB / 1K token」的固定系数对 qwen3 这类模型会低估 3 倍以上，
  * 拿它设计方案会直接 OOM。
+ *
+ * ⚠️ **混合线性注意力必须做层数修正**：qwen35 系（Qwen3.5 / MiniCPM-V 4.6）每
+ * `full_attention_interval` 层才有一层真 KV，其余层只存递归状态。不修正会高估 4 倍
+ * （实测 9B：结构式 128 KiB/token、真实 33.56 KiB/token），把「能全层上卡」误判成
+ * 「装不下」。修正后 9B 得 32.00，与实测偏差 4.6%。
+ *
+ * ⚠️ 修正后对 qwen35 **仍偏低约 15%**（32768 ctx 下实测：est 0.28 GB / 实测 0.33 GB）：
+ * 本式只算了真注意力层的 KV，而 SSM 的递归状态（`ssm.state_size` 等）也占显存，
+ * 且它**不随 ctx 增长**（是固定量），所以 ctx 越小偏离越大。偏低属危险侧，
+ * 但偏差在验收线内（<25%），且一旦用户预演过该组合就会用实测值覆盖。
+ * 阈值也留了余量（87% 宽裕线），暂不为它引入新字段与更复杂的公式。
+ *
+ * ⚠️ gemma 系（sliding_window / shared_kv_layers）**不适用**本公式：它靠滑窗 + 跨层
+ * 共享省 KV，实测 gemma4-e4b 在 32K 下账本只记 152 MiB，而本式给 1.48 GB（**近 10 倍**）。
+ * 这里仍返回结构式（高估方向安全），由 `kvConfidence()` 把可信度降到 'medium'
+ * 让界面**不给三色结论**、改为引导用户精确预演。
  *
  * 取不到结构参数时返回 null，调用方应退回粗估并在界面上标明「估算」。
  */
@@ -256,7 +285,68 @@ export function kvBytesPerToken(arch: ModelArch | null | undefined, ctk: string)
 
 	if (!n_layer || !n_head_kv || !k_len || !v_len) return null;
 
-	return n_layer * n_head_kv * (k_len + v_len) * (KV_BYTES_PER_ELEM[ctk] ?? 2);
+	// 只有每 interval 层才有真 KV → 有效层数向上取整（宁可略高估，不要低估到爆显存）
+	const iv = arch.full_attention_interval;
+	const effLayers = iv && iv > 1 ? Math.ceil(n_layer / iv) : n_layer;
+
+	return effLayers * n_head_kv * (k_len + v_len) * (KV_BYTES_PER_ELEM[ctk] ?? 2);
+}
+
+/** KV 估算的可信度 —— 决定徽章上标「实测 / 估算 / 仅供参考」 */
+export type KvConfidence = 'measured' | 'high' | 'medium' | 'low';
+
+/**
+ * 这套 KV 数字有多可信。
+ *
+ * - `measured`：来自 llama.cpp 的实测账本（`llama-fit-params`），偏差 < 5%
+ * - `high`    ：结构式 + 架构修正都齐（含混合注意力的分层间隔），偏差 ~5%
+ * - `medium`  ：滑窗 / 跨层共享架构，公式不适用、结果**偏高**，只能当上界看
+ * - `low`     ：拿不到完整结构参数（老版本 manager 或元数据缺失），等于粗估
+ */
+export function kvConfidence(
+	arch: ModelArch | null | undefined,
+	measured?: boolean
+): KvConfidence {
+	if (measured) return 'measured';
+
+	if (!arch) return 'low';
+
+	if (!arch.n_layer || !arch.n_head_kv || !arch.k_len || !arch.v_len) return 'low';
+
+	/*
+		⚠️ 过渡期识别：manager.py 改好后**不重启就不会生效**（外壳只在启动时 spawn 一次）。
+		旧进程返回的 `kv_shape` 里**完全没有** `full_attention_interval` 这个键 ——
+		此时对 qwen35 系会高估 4 倍（32 层全按真 KV 算），不降级就会给主力模型
+		（Qwen3.5-4B / 9B）**误报红灯**。
+		区分办法：新 manager 一定返回该键（取不到时值为 null），旧 manager 连键都没有。
+	*/
+	if (!('full_attention_interval' in arch)) return 'low';
+
+	if (arch.sliding_window || arch.shared_kv_layers) return 'medium';
+
+	return 'high';
+}
+
+/** 显存判定的三态，与 LM Studio 的绿/黄/红徽章语义对齐 */
+export type FitLevel = 'full' | 'tight' | 'over' | 'unknown';
+
+/**
+ * 把「总需求 vs 可用预算」判成三态。
+ *
+ * 阈值沿用路线图 §B.2：预算的 85% 以内算宽裕（留出碎片与驱动波动），
+ * 85%~100% 算吃紧（能上但建议降 KV 精度），超了就会掉层。
+ *
+ * ⚠️ 掉层的代价不是「慢一点」：每 token 要把激活值在 CPU↔GPU 之间搬 n_layer 趟，
+ * 实测 9B 从 ~30 tok/s 掉到 **~2 tok/s**。所以这里用保守阈值。
+ */
+export function fitLevel(totalGb: number, budgetGb: number): FitLevel {
+	if (!(totalGb > 0) || !(budgetGb > 0)) return 'unknown';
+
+	if (totalGb <= budgetGb * 0.85) return 'full';
+
+	if (totalGb <= budgetGb) return 'tight';
+
+	return 'over';
 }
 
 export type VramEstimate = {
@@ -275,6 +365,8 @@ export type VramEstimate = {
 	bytes_per_token: number | null;
 	/** bytes_per_token 是不是来自 llama.cpp 的实测账本（true 时误差 <5%） */
 	kv_measured?: boolean;
+	/** 这套数字的可信度（实测 / 结构+架构修正 / 仅供参考…），界面据此决定措辞 */
+	confidence: KvConfidence;
 	config: LaunchConfig;
 };
 
@@ -323,6 +415,7 @@ export function estimateVram(
 		ctk: config.ctk,
 		bytes_per_token: bpt,
 		kv_measured: measured,
+		confidence: kvConfidence(arch, measured),
 		config: { ...config }
 	};
 }

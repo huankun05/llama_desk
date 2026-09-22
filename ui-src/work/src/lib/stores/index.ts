@@ -51,12 +51,16 @@ export {
 	VRAM_FRAMEWORK_GB,
 	clampConfigForModel,
 	estimateVram,
+	fitLevel,
 	kvBytesPerToken,
+	kvConfidence,
 	maxCtxForVram,
 	normalizeModelKey,
 	modelKeyOf
 } from './launch-presets.svelte';
 export type {
+	FitLevel,
+	KvConfidence,
 	LaunchConfig,
 	LaunchConfigOverride,
 	LaunchPreset,
@@ -64,6 +68,10 @@ export type {
 	ModelRef,
 	VramEstimate
 } from './launch-presets.svelte';
+
+// KV CACHE (每模型每 KV 精度的实测字节/token；徽章与性能页共用)
+export { KvCacheStore, kvCacheStore } from './kv-cache.svelte';
+export type { KvMeasuredEntry } from './kv-cache.svelte';
 
 // SERVER
 export { serverStore } from './server.svelte';

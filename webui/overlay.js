@@ -881,7 +881,7 @@
     'Predicted VRAM for': '预测显存（模型）',
     '— change Context / KV precision above to update live.': '— 调整上方 Context / KV 精度即可实时更新。',
     'Predicted vs Current VRAM': '预测占用 vs 当前显存',
-    'Estimated: weights (GGUF size) + KV cache (0.04 GB/tok × n_ctx × KV-precision factor) + framework overhead (0.3 GB).': '估算：模型权重（GGUF 大小）+ KV 缓存（0.04 GB/词 × n_ctx × KV 精度系数）+ 框架开销（0.3 GB）。',
+    'Estimated: weights (GGUF size) + KV cache (real per-layer structure, corrected for hybrid-attention models) + compute buffer (logits + graph scratch, scales with ubatch) + framework overhead (0.3 GB).': '估算：模型权重（GGUF 大小）+ KV 缓存（按真实逐层结构计算，混合注意力架构已做层数修正）+ 计算缓冲（logits + 图执行临时张量，随 ubatch 变化）+ 框架开销（0.3 GB）。',
     'Model Switcher': '模型切换',
     'models · click to expand': '个模型 · 点击展开',
     'Start model': '启动模型',
@@ -915,6 +915,13 @@
     'not loaded — it will come up on your next message': '未加载 —— 下次发消息时会自动拉起',
     'Loaded': '已加载',
     'Vision': '视觉',
+    // ---- 模型行内的「跑不跑得动」徽章（2026-09-22，见 docs/roadmap-v2.md §B-L1）----
+    // 语义：Full GPU 绿 = 全层上卡；Tight fit 黄 = 能上但吃紧；Offloads 红 = 会掉层（约 2 tok/s）；
+    // Predict? 灰 = 该架构的结构式 KV 偏差过大（滑窗/共享 KV），必须点一次精确预演才能判
+    'Full GPU': '全层上卡',
+    'Tight fit': '显存偏紧',
+    'Offloads': '会掉层',
+    'Predict?': '待预演',
     'Stopping…': '正在停止…',
     'Starting…': '正在启动…',
     'Started.': '已启动。',

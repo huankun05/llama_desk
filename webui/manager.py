@@ -192,6 +192,19 @@ def kv_shape(meta, arch):
     head_dim = (n_embd // n_head) if (n_embd and n_head) else None
     k_len = g("attention.key_length") or head_dim
     v_len = g("attention.value_length") or k_len
+
+    # ── 混合注意力架构的修正项 ─────────────────────────────────────────────
+    # 上面那条「每层都存完整 KV」的公式对**混合线性注意力**架构会高估数倍：
+    # qwen35（Qwen3.5 / MiniCPM-V 4.6）32 层里每 4 层才有一层真注意力，
+    # 其余层只保留一个固定大小的递归状态。实测 qwen3.5-9b 在 f16 下
+    # 每 token 33.56 KiB，而结构式给 128 KiB —— 差 3.8 倍，正好等于
+    # n_layer / full_attention_interval。前端拿这个字段把公式修正回真实量级。
+    full_attn_interval = g("full_attention_interval", "attention.full_attention_interval")
+    # gemma 系走的是另一种省 KV 的路子：滑窗 + 跨层共享，**不能用单一系数修正**，
+    # 这里只把原始参数透出去，让前端把可信度降级并提示「建议精确预演」。
+    sliding_window = g("attention.sliding_window")
+    shared_kv_layers = g("attention.shared_kv_layers")
+
     vocab = g("vocab_size")
     if vocab is None:
         # 部分模型（如 qwen3）不写 vocab_size，用 tokenizer 的数组长度兜底
@@ -209,6 +222,9 @@ def kv_shape(meta, arch):
         "k_len": k_len,
         "v_len": v_len,
         "vocab_size": vocab,
+        "full_attention_interval": full_attn_interval,
+        "sliding_window": sliding_window,
+        "shared_kv_layers": shared_kv_layers,
     }
 
 # 模型列表缓存：GET 永远瞬时返回缓存；冷扫描放到后台线程，避免首屏超时。
