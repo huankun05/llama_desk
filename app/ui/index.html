@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>llama.cpp</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background:
+      radial-gradient(900px 520px at 50% -8%, #17243d 0%, rgba(11,18,32,0) 62%),
+      linear-gradient(180deg, #0b1220 0%, #070c16 100%);
+    color: #e6edf7;
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  .card {
+    width: 460px;
+    padding: 34px 34px 28px;
+    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(30,41,59,.62) 0%, rgba(15,23,42,.62) 100%);
+    border: 1px solid rgba(148,163,184,.16);
+    box-shadow: 0 24px 70px -20px rgba(0,0,0,.75), inset 0 1px 0 rgba(255,255,255,.05);
+    backdrop-filter: blur(14px);
+    text-align: center;
+  }
+  .logo {
+    width: 62px; height: 62px; margin: 0 auto 18px;
+    border-radius: 16px;
+    background: linear-gradient(160deg, #38bdf8 0%, #6366f1 100%);
+    display: flex; align-items: center; justify-content: center;
+    font: 700 24px/1 "Segoe UI", system-ui, sans-serif;
+    color: #fff; letter-spacing: 1px;
+    box-shadow: 0 10px 26px -8px rgba(56,189,248,.6);
+  }
+  h1 { margin: 0 0 6px; font-size: 17px; font-weight: 650; letter-spacing: .2px; }
+  .sub { margin: 0 0 22px; font-size: 12px; color: #94a3b8; }
+  .msg { min-height: 22px; font-size: 13px; color: #cbd5e1; transition: color .2s; }
+  .bar {
+    margin: 16px 0 8px; height: 6px; border-radius: 99px;
+    background: rgba(148,163,184,.16); overflow: hidden;
+  }
+  .bar > i {
+    display: block; height: 100%; width: 0%;
+    border-radius: 99px;
+    background: linear-gradient(90deg, #38bdf8, #818cf8);
+    transition: width .45s cubic-bezier(.4,0,.2,1);
+  }
+  .pct { font: 600 11px/1 ui-monospace, Consolas, monospace; color: #64748b; letter-spacing: .5px; }
+  .hint {
+    margin-top: 20px; padding-top: 16px;
+    border-top: 1px solid rgba(148,163,184,.12);
+    font-size: 11.5px; color: #7c8aa0; line-height: 1.7; text-align: left;
+  }
+  .hint code {
+    font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+    background: rgba(148,163,184,.13); padding: 1px 5px; border-radius: 4px; color: #a9b6c8;
+  }
+  body.err .msg { color: #fca5a5; }
+  body.err .bar > i { background: linear-gradient(90deg, #ef4444, #b91c1c); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">&gt;_</div>
+    <h1>llama.cpp 本地服务</h1>
+    <p class="sub">llama-desk 正在编排后端进程</p>
+
+    <div class="msg" id="msg">正在初始化…</div>
+    <div class="bar"><i id="bar"></i></div>
+    <div class="pct" id="pct">0%</div>
+
+    <div class="hint">
+      首次加载模型约 10–25 秒。界面就绪后会自动跳转到合并性能页。<br />
+      若长时间停在此处，请查看 <code>D:\llama\app\logs\</code> 下的日志。
+    </div>
+  </div>
+
+<script>
+  var msgEl = document.getElementById('msg');
+  var barEl = document.getElementById('bar');
+  var pctEl = document.getElementById('pct');
+
+  window.__boot = function (m, p, err) {
+    if (typeof m === 'string' && m) msgEl.textContent = m;
+    var v = Math.max(0, Math.min(100, Number(p) || 0));
+    barEl.style.width = v + '%';
+    pctEl.textContent = v + '%';
+    document.body.classList.toggle('err', !!err);
+  };
+
+  // 心跳：告诉 Rust 侧「WebView2 真的把界面渲染出来了」。
+  // 窗口建好但渲染失败时页面是白的，Rust 侧据此回退到系统浏览器。
+  (function () {
+    function ping() {
+      try {
+        var inv = (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke)
+          || (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke);
+        if (inv) { inv('ui_ready', {}); return true; }
+      } catch (e) { /* 非 Tauri 环境（直接用浏览器打开）时忽略 */ }
+      return false;
+    }
+    if (ping()) return;
+    var n = 0;
+    var t = setInterval(function () { if (ping() || ++n > 50) clearInterval(t); }, 100);
+  })();
+</script>
+</body>
+</html>

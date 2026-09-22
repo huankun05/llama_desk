@@ -1,0 +1,803 @@
+# llama_desk 下一阶段方案（v2 路线图）
+
+> 2026-09-22 起草。所有结论都建立在**本机实测**与**同类软件公开文档/实测报告**之上，未实测的地方标了 `⚠️未验证`。
+> 本文档是**待讨论**的方案，不是最终决定 —— 末尾 §5 列了 8 个需要你拍板的问题。
+
+---
+
+## 0. 这份方案怎么来的
+
+上一轮（`diag/architecture-review.md`）的结论是：**架构是干净的，真正的缺口是"模型从哪来"** —— 整条链上唯一还需要你动手的环节。
+
+这一轮按你说的做法，对**每个方向先去查同类软件怎么做**，再回来定方案。调研对象与方法：
+
+| 对标的软件 | 为什么看它 | 看的维度 |
+|---|---|---|
+| **LM Studio** | 桌面端体验的事实标准，闭源但文档极全 | 模型搜索/下载/兼容性徽章、加载进度、TTL 与 Auto-Evict、基准 |
+| **Ollama** | 「模型获取」这一环最成熟 | `pull` 的分段进度/断点续传/blob 去重、`keep_alive`、`ollama ps` |
+| **Jan / GPT4All / Open WebUI / text-generation-webui** | 各有取舍，看简化版怎么做 | 下载入口的形态（搜索式 vs 输框式）、取消/进度 |
+| **ModelScope / hf-mirror** | 国内网络现实 | SDK 形态、断点续传、镜像 |
+| **Hugging Face Hub** | 数据源本身 | API 返回结构、限速、gated、`hf_transfer`/`xet` |
+| **llama.cpp 官方工具链** | 我们手里就有的轮子 | `llama-bench` / `quantize` / `imatrix` / `perplexity` |
+| **NVIDIA 官方 + 运维实践** | 「慢」的归因方法论 | `clocks_event_reasons` 七种降频原因怎么读 |
+| **第三方显存计算器** | 可视化范式 | 显存拆成 权重/KV/计算缓冲/OS 四块 |
+
+---
+
+## 1. 现状基线（决定"该做什么"的前提）
+
+### 1.1 盘子有多大
+
+| 目录 | 体积 | 该不该进 git |
+|---|---:|---|
+| `models/` | **49 GB** | ❌ 绝不（GitHub 单文件上限 100 MB） |
+| `app/`（含 `src-tauri/target` 约 3.3 GB + `.webview`） | 4.1 GB | ❌ 源码入，产物不入 |
+| `ui-src/`（含 `node_modules`） | 639 MB | ❌ 源码入，依赖不入 |
+| `bin/`（llama.cpp b10853） | 1.1 GB | ❌ 走官方 release |
+| `webui/`（构建产物 19 MB + **`manager.py` 2120 行源码**） | 19 MB | ⚠️ **混合目录，见 §5 问题 1** |
+
+### 1.2 代码规模
+
+| 层 | 文件 | 行数 | 备注 |
+|---|---:|---:|---|
+| Rust 外壳 `app/src-tauri/src` | 4 | 1489 | config / supervisor / updater / main |
+| 前端 `ui-src/work/src` | 608 | 74047 | 最大单文件 `performance/+page.svelte` **2781 行** |
+| 后端 `webui/manager.py` | 1 | **2193** | 单文件，纯标准库 |
+| 工具 `tools/` | 60 | 5637 | build/ui/dict/model/bench/ops/diag |
+
+### 1.3 两个必须记住的约束
+
+**① `manager.py` 是纯标准库的。** 全部 import 只有：
+
+```python
+os, sys, json, time, uuid, subprocess, threading, math, socket, gzip, email.utils,
+urllib.request, http.server, urllib.parse, ctypes
+```
+
+**没有 `requests`，没有 `huggingface_hub`。** 这一条直接决定了 §3.A 的方案选型。
+
+**② 两条通路 + 零模型哨兵。** 推理走 `:8080`（相对路径，页面 origin 就是它），管理走 `:8090`（绝对地址 + CORS）。哨兵（router 模式）是为了**保住 origin ⇒ 不丢 localStorage** 才存在的，不是设计洁癖。
+
+### 1.4 我手里已经有的"轮子"
+
+`bin/` 里除了 `llama-server` 还有一整套工具 —— 这决定了哪些功能是"边际成本极低"的：
+
+`llama-bench.exe`（基准）、`llama-batched-bench.exe`、`llama-quantize.exe`（量化）、`llama-imatrix.exe`（量化校准）、`llama-perplexity.exe`（量化质量验证）、`llama-gguf-split.exe`（拆分/合并）、`llama-fit-params.exe`（显存预演，已在用）、`llama-tokenize.exe`（分词检查）。
+
+---
+
+## 2. 方向总览与优先级
+
+排序口径 = **收益 / 成本 / 风险**。P0 是"不做就一直疼"的，P3 是"锦上添花"。
+
+| # | 方向 | 竞品谁做得好 | 收益 | 成本 | 风险 | 优先级 |
+|---|---|---|---|---|---|---|
+| **H** | 工程卫生：上 git、拆 `manager.py`、启动页 | —（行业默认） | 🔴 高（唯一回滚手段只有 3 份快照） | 低 | 低 | **P0** |
+| **B** | 显存预算 + 「能不能全层上卡」徽章 | LM Studio（绿/黄/红） | 🔴 高（16 个模型不用逐个试） | 中 | 低 | **P0** |
+| **C** | 加载进度条（阶段化） | LM Studio（Loading→Ready） | 🟠 中高（首次/唤醒都要等 5~30s） | 中 | 低 | **P1** |
+| **D** | 空闲卸载的可见性与控制 | Ollama（`UNTIL` 倒计时） | 🟠 中高（静默卸载最让人困惑） | 低 | 低 | **P1** |
+| **A** | 应用内下载模型 | LM Studio / Ollama | 🔴 高（唯一还需用户动手的环节） | **高** | 中（网络/安全/磁盘） | **P1** |
+| **E** | 一键基准 + 留档排行榜 | `llama-bench` / LM Studio 的 tok/s | 🟠 中（结果现在散在终端） | 中 | 低 | **P2** |
+| **F** | GPU 健康 / 归因面板 | GPU-Z / HWiNFO / `nvidia-smi` | 🟠 中（能区分"机器慢"和"配置错"） | 中 | 低 | **P2** |
+| **G** | 模型工具箱：量化 / 拆分 / 困惑度 | **没人做**（差异化） | 🟡 中（对 8GB 卡很实用） | 中 | 中（长任务/磁盘翻倍） | **P3** |
+
+---
+
+## 3. 逐方向详案
+
+---
+
+### A. 模型获取：应用内下载器（P1，本文档最大的一块）
+
+#### A.0 竞品调研结论
+
+| 软件 | 下载入口形态 | 断点续传 | 进度粒度 | 校验 | 亮点 | 缺点 |
+|---|---|---|---|---|---|---|
+| **LM Studio** | **搜索式**：内置 HF 搜索（`⌘⇧M`），列出各量化变体 + 文件大小 + **绿/黄/红兼容性徽章** | ✅ | 百分比 + 速度 + 剩余时间 | — | 可**暂停/恢复/取消/重试**；CLI `lms get author/repo@q4_k_m`；模型落 `~/.lmstudio/models/<key>/` | 闭源；不校验哈希 |
+| **Ollama** | **命令行式**：`ollama pull name:tag`；Open WebUI 里是个输入框 | ✅（重跑即续传） | **分段**：`pulling manifest` → 每层 digest 百分比 → `verifying sha256 digest` → `writing manifest` → `success` | ✅ sha256 | **blob 去重**（同层不重复下；跨模型共享）；`OLLAMA_MODELS` 改目录；磁盘不足有明确报错 | 入口不友好（要记 tag）；不支持任意 HF 仓库，得走 `hf.co/...` |
+| **Jan** | 「+ Add Model → From Hugging Face → 搜 repo → 选 Q4_K_M → Download & Add」 | ✅ | 有 | ✅ | 一步到位（下载+校验+注册）；支持拖入本地 GGUF | 模型库窄 |
+| **Open WebUI** | 管理面板里一个 "Pull a model" 输入框（Ollama tag 或 `hf.co/...`） | 依赖 Ollama | 有进度条 + **可取消** | 依赖 Ollama | 极简 | 不自建下载能力 |
+| **text-generation-webui** | "Download custom model or LoRA" 输入框（填 repo id） | 有 | 橙色进度条 + 终端多进度条 | — | 支持 `--model-dir` 自定义 | 体验原始 |
+| **ModelScope** | Python SDK：`snapshot_download(repo, allow_patterns='*q4_k_m.gguf')` / `model_file_download(repo, file)` | ✅ | tqdm | ✅ | **国内速度好**，实测能跑满带宽 | API 非标；需 `pip install modelscope` |
+
+**共同结论（三条）**：
+
+1. **入口有两种流派**：「搜索式」（LM Studio / Jan）和「输框式」（Open WebUI / text-gen-webui / Ollama）。搜索式体验好得多，但要求有模型元数据源 —— 而 HF 的 API 恰好白送。
+2. **断点续传是刚需，不是加分项。** 一个 8~20 GB 的文件断一次就重来，用户会骂人。所有成熟实现都做。
+3. **进度要"分段"而不是一根光条**：manifest → 下载 → 校验 → 落盘。Ollama 的文案就是行业共识。
+
+#### A.1 关键实测：HF 的 API 白送了我们需要的全部元数据
+
+本机实测（2026-09-22，`curl` 直连，无代理）：
+
+```
+https://huggingface.co/api/models?filter=gguf&limit=1        → 200，0.64s
+https://huggingface.co/api/models/Qwen/Qwen2.5-0.5B-Instruct-GGUF?blobs=true
+```
+
+返回结构里对我们有用的部分：
+
+```jsonc
+{
+  "id": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+  "sha": "9217f5db...",              // ← 仓库 revision，可钉版本
+  "downloads": 204858, "likes": 135,
+  "gated": false,                     // ← 是否要申请访问权
+  "gguf": {
+    "architecture": "qwen2",          // ← 架构（和本地 kv_shape 判断对上）
+    "context_length": 8192,           // ← 原生上下文长度（决定 ctx 上限）
+    "total": 630167424,               // ← 参数量
+    "totalFileSize": 1266425696
+  },
+  "siblings": [
+    { "rfilename": "qwen2.5-0.5b-instruct-fp16.gguf",
+      "size": 1266425696,
+      "lfs": { "sha256": "8e0ae26000627ed62de0e78e41860af70094558b9d2913385c842a6aa06cf3fc" } }
+    //                                            ↑↑↑ 下载前就拿到哈希，可直接强校验
+  ]
+}
+```
+
+**⇒ 一次请求就能拿到：文件清单 + 每个文件大小 + SHA256 + 架构 + 原生 ctx 长度 + 下载量 + 是否 gated。**
+
+这足以撑起「搜索 → 选量化 → 看到"这台机器能不能跑" → 下载 → 校验」整条链，**而且一个第三方库都不用装。**
+
+其他实测到的网络事实：
+
+| 事实 | 实测 | 影响 |
+|---|---|---|
+| `https://huggingface.co` 直连 | ✅ 200 / 0.64s | 本机能直连，不需要代理 |
+| `https://hf-mirror.com` | 308 重定向 | 镜像可用（`urllib` 自动跟随重定向），做成设置项 |
+| `https://modelscope.cn/api/v1/models` | 404（路径不对，需换 endpoint） | ModelScope 走 SDK 或换 API，列为 P3 |
+| HF 匿名限速 | 约 1000 req/h/IP；带 token 提到 50000 req/h | 我们的调用量远低于限额，**不需要 token**（除非下 gated 模型） |
+| `hf_transfer` / `hf_xet` | 需额外装 Rust 扩展 | 与"纯标准库"冲突，**先不做**（见 §5 问题 3） |
+
+#### A.2 方案选型：三条路
+
+| 方案 | 做法 | 优点 | 缺点 | 结论 |
+|---|---|---|---|---|
+| **① 外挂 `huggingface_hub`** | 让 manager 调 `python -c "from huggingface_hub import hf_hub_download"` | 功能最全（xet 分块加速、自动重试、缓存布局、token 管理） | 破坏"纯标准库"；要给系统 `python` 装包；多一个会随环境变化的依赖；进度回调要跨进程传 | ❌ 不推荐（除非你要 `xet` 的 3~5× 提速） |
+| **② 官方 HF 工具兜底** | 调 `hf` CLI / `huggingface-cli download` 子进程，抓 stdout 解析进度 | 实现最快（~50 行） | 要用户机器上有这东西；版本差异大；进度解析脆弱 | ⚠️ 可作为「高级」开关，不作主路径 |
+| **③ 自研标准库下载器** | `urllib.request` + `Range:` 头断点续传，自己写线程池与状态机 | **零依赖**，与 manager 风格一致；行为完全可控（能精确对接我们的扫描器/校验/UI） | 约 300~400 行；重试/超时/镜像切换要自己写 | ✅ **推荐** |
+
+**推荐 ③**，理由是 ① 的收益（`xet` 加速）在我们这个网络环境下不稳定，而代价（引入包管理 + 环境漂移）是确定的。§5 问题 3 请你确认。
+
+#### A.3 推荐方案详设
+
+**后端：`webui/manager.py` 新增一组接口**（沿用现有 `Handler.do_GET/POST` 风格）
+
+```
+GET  /api/hf/search?q=<关键词>&limit=20
+     → [{ repo, downloads, likes, gated, arch, native_ctx, gguf_files:[{name,size,sha256}] }]
+     → 实现：一次 https://huggingface.co/api/models?search=&filter=gguf&sort=downloads&limit=N
+             （siblings 只在详情接口有 → 列表先不带文件，展开时再查，省一半请求）
+
+GET  /api/hf/repo?repo=<owner/name>
+     → 详情：文件清单（含 sha256/size）+ 架构 + 原生 ctx + gated
+
+POST /api/downloads            body: {repo, files:[...], revision?, mirror?}
+     → {id}；入队，后台线程开始下
+GET  /api/downloads            → 全部任务：{id, repo, files:[{name,size,got,speed,eta,state}], state}
+POST /api/downloads/{id}/pause | /resume | /cancel | /retry
+DELETE /api/downloads/{id}     → 删除任务记录（可选删已下文件）
+```
+
+**下载线程状态机**（对齐 Ollama 的分段文案，用户已经熟悉这套）：
+
+```
+queued → checking_disk → downloading → verifying_sha256 → finalizing → done
+                └──────────────┴───────────────┴──────────────→ failed(原因)
+```
+
+**落盘策略（最关键的三条）**
+
+1. **写到 `xxx.gguf.part`，校验通过后 `os.replace()` 原子改名。**
+   - 扫描器只认 `*.gguf`，`.part` 天然不会被扫到 → 下载中的半成品不会污染模型列表（这点很重要：`_do_scan()` 是按扩展名扫的）。
+   - `os.replace()` 在同一分区是原子的，不会出现"文件出现了一半"的中间态。
+2. **断点续传**：`Range: bytes=<已下字节>-`；响应是 `206` 就续，是 `200` 说明服务端不支持 → 老老实实从头下并重置计数。同时**把已下字节数定期落盘**（同目录 `xxx.part.json`），进程被杀也能续。
+3. **SHA256 边下边算**（`hashlib` 增量），下完直接比对，**不用二次读 8 GB 磁盘**。
+
+**其他必须处理的现实问题**
+
+| 问题 | 处理 |
+|---|---|
+| HF 的下载 URL 会 302 到 CDN | `urllib.request` 默认跟随重定向；但 **`Range` 头必须在重定向后仍然有效** → 用 `OpenerDirector` 且显式处理 `Request` 对象，转发 `Range`（HF 的 `resolve` 端点支持） |
+| 磁盘不足 | 下载前 `shutil.disk_usage(models_dir)`，留给系统 ≥ 5 GB；不足则拒绝并明确报「需要 X GB，现有 Y GB」 |
+| 多文件（GGUF 分片 + mmproj） | 支持一次任务多文件；**下 `.gguf` 时自动探测同仓库 `mmproj-*.gguf`（含 `-f16`/`-BF16` 变体）并提示"要一起下吗"** —— 复用已有的 `find_mmproj` / `_pair_mmproj` |
+| gated 模型 | `gated: true` 时要求用户填 HF token；token 存 `app/hf-token.txt`（**不进 git**），UI 里只显示前 4 位 |
+| 镜像切换 | 全局设置 `hf_endpoint`（默认 `https://huggingface.co`，可切 `https://hf-mirror.com`）+ **每任务可覆盖**；失败 3 次自动提示换镜像 |
+| 并发 | 默认**单任务 + 单连接**（避免抢满带宽影响你正在用的网络）；设置里可开 4 连接（HF 支持 Range 并发） |
+| 速率显示 | 滑动窗口（最近 5s）算速度，ETA = 剩余 / 速度；**卡住 30s 无字节增长 → 标记 "stalled" 并自动重试一次** |
+
+**前端：新增「模型库 / 下载」区块**
+
+三个可选位置，我倾向 **②**：
+
+| 方案 | 位置 | 说明 |
+|---|---|---|
+| ① 独立路由 | 新 `/(chat)/models` | 干净，但多一个页面、多一份首屏代码 |
+| ② **并入性能页，作为第 7 个区块「获取模型」** | 现有 `performance/+page.svelte` | 与「磁盘上的模型」紧邻，语义连贯；但要小心那个文件已经 2781 行 |
+| ③ 对话页模型下拉里加一行「下载新模型…」 | 弹出 Dialog | 动线最短（用户就在想"我要用别的模型"），但 Dialog 要装下搜索+详情，偏重 |
+
+交互（对标 LM Studio）：搜索框 → 结果卡片（repo 名 / 下载量 / 架构 / 原生 ctx）→ 展开变体列表（**每行带三色徽章，见 §B**）→ 勾选 mmproj → 「下载」。
+
+**安全（这一条不能省）**
+
+| 风险 | 事实 | 我们的处理 |
+|---|---|---|
+| **GGUF 解析漏洞** | `CVE-2024-23496`（CVSS 9.8，`gguf_fread_str` 堆溢出，加载即 RCE）、`CVE-2025-53630`、`CVE-2026-33298`（都是同一处整数校验被绕过） | ① **域名白名单**：只允许 `huggingface.co` / `hf-mirror.com`（禁任意 URL，防 SSRF 到内网）；② 下载走 `.part`；③ 升级 llama.cpp 时在 README 记一条；④ 首次加载新模型时的隔离无法在桌面应用里做 → **至少给 UI 提示**「模型文件与可执行文件同级信任，只从可信作者下载」 |
+| **chat template 注入** | GGUF 把 Jinja2 模板存在元数据里，运行时渲染；未沙箱的实现在每次会话初始化时可执行代码（Pillar Security 报告） | 复用现有策略：**用 llama-server 内嵌模板**（我们已经在这么做）；对下载来的模型，UI 明示"模板来自模型文件本身" |
+| **恶意仓库** | JFrog 在 HF 上扫出约 100 个带恶意代码的模型（主要针对 pickle 格式） | 我们只下 **GGUF**（不是 pickle），风险面小；仍做 `gated`/作者/下载量展示，让用户有判断依据 |
+| **路径穿越** | 恶意 `rfilename` 写成 `../../x` | 落盘前规范化并断言落在 `models/hf/` 之下；**只接受 `*.gguf` / `*.json`** 后缀 |
+
+#### A.4 验收标准
+
+1. 搜索「Qwen3.5 4B GGUF」→ 5 秒内出结果，能展开看到各量化的文件大小。
+2. 下一个 3~4 GB 的 GGUF：进度、速度、ETA 正确；**中途 `taskkill` 掉 manager 再启动，能从断点续**。
+3. 下载完成后 `/api/models` 立刻出现该模型（说明 `.part → .gguf` 的原子改名与扫描器配合正确）。
+4. **故意改坏 sha256**（下完手工改一个字节再触发校验）→ 报「校验失败」并拒绝落地。
+5. 断网重连 → 自动续传，不需要用户操作。
+6. 磁盘只剩 2 GB 时发起 8 GB 下载 → 立刻拒绝并给出明确数字。
+
+#### A.5 风险与未知
+
+- `⚠️未验证`：HF `resolve` 端点在**重定向后**是否仍尊重 `Range`（本机没实测大文件）。落地第一步就要写个 20 行探针验证，不通过则退回"直连 CDN 地址 + Range"。
+- `⚠️未验证`：`hf-mirror.com` 的 `Range` 行为是否与主站一致。
+- 若你以后要下 gated 模型（Llama / Gemma），流程要多一步「去模型页点 Request access」，UI 得解释清楚，否则用户只会看到 403。
+
+---
+
+### B. 显存预算 + 「这台机器能不能跑」徽章（P0）
+
+#### B.0 竞品调研结论
+
+| 来源 | 做法 | 可借鉴的点 |
+|---|---|---|
+| **LM Studio** | 模型列表/搜索页**每行一个三色徽章**：🟢 全 GPU / 🟡 部分卸载（部分层跑 CPU，会慢）/ 🔴 装不下，换更小量化；另有 `lms load X --estimate-only` **不加载就打印** GPU 与总内存需求 | **"不加载就出数"** 是核心；三色语义已形成用户共识 |
+| **第三方计算器**（calculatorbox / nexprotools / craftrigs） | 把显存拆成 **权重 / KV / 计算缓冲 / OS+显示** 四块，给结论行如「43/48 层能上卡，剩 5 层要 1.3 GB 系统内存，**速度会降**」 | **结论行比数字有用**；一定要有"剩余空间"这一块 |
+| **世界编程那篇《为什么 24GB 显卡不给你 24GB》** | `可用预算 = 物理 × 0.90`，并在算完后乘 `(1 + 20%)` 余量 | 别拿显存标称值当预算 |
+| **llama.cpp** | `llama-fit-params` 是唯一权威（我们已经在用） | **估算只能当引导，最终结论必须来自 `/api/fit`** |
+
+#### B.1 我们已有的优势与坑
+
+**优势**：`/api/models` 的返回里**已经带了 `kv_shape`**（`n_layer` / `n_head_kv` / `k_len` / `v_len`），`/api/fit` 也已经能精确预演（走 `llama-fit-params.exe`）。缺的只是**把它提到列表行内**。
+
+**必须记住的三个坑**（都在 MEMORY 里，别重蹈）：
+
+1. **结构式 KV 公式对混合线性注意力架构会高估 4~12×**。`qwen3.5-9b`（arch `qwen35`）32 层里每 4 层才有真 KV → 要乘 `n_layer / full_attention_interval`。实测 9B：f16 **33.56** / q8_0 18.56 / q4_0 10.56 KiB per token。`gemma4` 有 `sliding_window` + `shared_kv_layers`，同样不能硬算 → 判断键用 `tools/model/gguf_kvscan.py`。
+2. **计算缓冲是大头**：`-b 2048 -ub 512` → **501 MiB**，`-b 512 -ub 128` → **150 MiB**。
+3. **`-fitp on` 会顶掉 `-c … -ngl …` 那行** → 账本（`fit_mem`）与拟合（`fit_plan`）**必须分两次调用**。
+
+#### B.2 方案：三层，从便宜到贵
+
+**L1 —— 零成本前端估算（先做这个，当天就能看到效果）**
+
+纯前端，用**已有数据**算，不新增后端接口：
+
+```
+空闲显存 = gpu_totals().free - 桌面占用        // /api/gpu-cleanup 已有
+预算     = 空闲显存 × 0.90
+
+权重   = 文件大小（≈实际加载量，因为 GGUF 是压缩后的量化权重）
+KV     = n_layer × n_head_kv × (k_len + v_len) × ctx × 字节系数
+         ⚠️ 若 arch ∈ {qwen35, gemma4…} 则乘 n_layer / full_attention_interval
+         字节系数：f16 = 2，q8_0 = 34/32，q4_0 = 18/32
+缓冲   = f(batch, ubatch)：b512/ub128 ≈ 150 MiB，b2048/ub512 ≈ 501 MiB
+总需求 = 权重 + KV + 缓冲
+
+🟢 总需求 ≤ 预算 × 0.85          → 全层上卡
+🟡 预算 × 0.85 < 总需求 ≤ 预算    → 能上但吃紧（建议降 KV 精度）
+🔴 总需求 > 预算                  → 会掉层，速度断崖（约 2 tok/s 量级）
+```
+
+**必须在 UI 上标"估算"**，并在徽章旁放**「精确预演」**按钮（点一次走 `/api/fit`）—— 不能拿估算冒充权威数字。
+
+**L2 —— 后台精确预演缓存（让列表既准又不卡）**
+
+- 新增 `_fit_prewarm()` 后台线程：对「最近使用 / 有启动方案」的 N（建议 8）个模型，按各自方案跑 `fit_mem` + `fit_plan`，结果写 `app/fit-cache.json`。
+- 缓存键 = `path + size + mtime_ns + ctx + ctk + ctv + batch + ubatch + fit_target`（**任何一项变了就失效** —— 沿用 `parse_gguf_cached()` 那套思路）。
+- `/api/models` 返回时**只读缓存**（不阻塞），带 `fit_cached: true/false` 与 `fit_age_secs`。
+- 排空策略：线程池 1 个 worker，避免和正在跑的实例抢显存（`llama-fit-params` 本身不占显存，但会起 llama.cpp 上下文，实测 CPU 有尖峰 → 放在前台请求之外）。
+
+**L3 —— 显存预算条（性能页可视化）**
+
+```
+[████████ 权重 3.3 GiB ████][███ KV 0.4 ███][█ 缓冲 0.5 █][██ 桌面 1.9 ██][░░ 空闲 2.9 ░░]
+ 0                                                                          8.0 GiB
+                                    └──── 全层上卡线 ────┘
+```
+
+- 「桌面占用」= `gpu_totals().used - 当前实例实际占用`（实测你机器上空载有 Lively 壁纸 + 6×WebView2 + 4×Electron ≈ **1.9 GB** 显存，这块一定要单独画出来，否则用户永远算不明白为什么 8 GB 只能当 6 GB 用）。
+- 颜色：**这里用中性/主题色梯度，不要用涨红跌绿**（这是空间占比，不是涨跌）。
+
+#### B.3 验收标准
+
+1. 8 GB 卡、16 个模型：徽章判定与 `/api/fit` 的 `layers_on_gpu == n_layer` **一致率 ≥ 90%**。
+2. 列表首屏（含徽章）渲染 < 200 ms，**不触发任何子进程**。
+3. 对 9B 模型，估算与 `/api/fit` 的偏差 < 25%（因为 KV 已做架构修正；不做修正的话偏差会 4~12×）。
+4. 手动把 batch 从 512 改到 2048，徽章从 🟢 变 🟡（缓冲 +350 MiB 生效）。
+
+---
+
+### C. 加载进度条（P1）
+
+#### C.0 现状与调研
+
+**现状**：首次发消息 / 空闲唤醒 → `ensureModelReady()` → `/api/switch` → **轮询 `/health` 最长 120 s**。这段时间界面上只有"生成中"三个字。实测 4B 的加载是 **5.4 秒**（有日志时间戳为证），大模型更久。
+
+**调研结论：llama-server 没有官方的进度 API。**
+
+| 事实 | 出处 |
+|---|---|
+| 加载中 `GET /health` → **503** `{"error":{"code":503,"message":"Loading model","type":"unavailable_error"}}`；就绪 → 200 `{"status":"ok"}` | llama.cpp server 官方文档（唯一的状态信号，就两档） |
+| LM Studio 有加载进度条 + `Loading model…` → `Ready` 状态点；开发者日志里能看到 `load_tensors: offloaded N/M layers to GPU` | LM Studio 文档/实测文 |
+| LM Studio 加载 20~30 s 时状态栏就是 "Loading model..." | 实测文 |
+
+**⇒ 进度只能由三样东西合成：**
+
+**(1) `/health` 的状态码** —— 已知的两档（loading / ok）
+**(2) llama-server 的 stdout 日志** —— **manager 已经把它写进 `webui/inst_<port>.log`**，且每行自带 `H.MM.SSS.mmm` 时间戳
+**(3) 按文件大小估的总时长** —— 本机实测热缓存 **≈ 1.2 s + 0.65 s/GB**
+
+#### C.1 关键发现：日志里有完整的阶段锚点
+
+`webui/inst_8080.log` 实测（4B Q6_K + mmproj，131072 ctx）：
+
+```
+0.00.107 I srv    load_model: loading model 'D:/llama/models/hf/Qwen3.5-4B-...-Q6_K.gguf'
+0.03.888 I cmn          init: llama threadpool init, n_threads = 8
+0.03.970 W load_hparams: Qwen-VL models require at minimum 1024 image tokens ...
+0.05.298 I srv    load_model: loaded multimodal model, 'D:\llama\...\mmproj-...-BF16.gguf'
+0.05.358 I srv    load_model: initializing, n_slots = 1, n_ctx_slot = 131072, kv_unified = 'true'
+0.05.364 I srv  llama_server: model loaded
+0.05.364 I srv  llama_server: listening on http://127.0.0.1:8080
+```
+
+**这六行正好构成 6 个阶段**，而且**时间戳自带**（不用自己计时）。注意 `n_ctx_slot` 直接暴露了实际生效的上下文长度。
+
+#### C.2 方案
+
+**后端**：`GET /api/instances/{id}/progress`
+
+```jsonc
+{
+  "phase": "reading_weights | mmproj | kv_init | loaded | listening",
+  "phase_label": "读取权重",
+  "log_tail": ["...末 5 行..."],
+  "elapsed_ms": 3210,
+  "expected_ms": 5400,          // 由文件大小估：1200 + 650 × GB
+  "n_ctx_slot": null,           // 只在 kv_init 之后有值
+  "ok": false
+}
+```
+
+实现：`_phase_of(logfile)` 读文件尾部 4 KB（**不是全文**，日志会长），用 `_decode_bytes()` 解码（**绝不能直接 UTF-8 解码** —— GBK 路径会炸），正则匹配上面 6 个锚点，取**最后命中的那个**。
+
+**前端**：在对话气泡/顶部状态条显示
+
+- 阶段文案（细粒度，给"还在动"的感觉）：`拉起进程 → 读取权重 → 加载视觉投影层 → 初始化 KV → 完成`
+- **不确定进度条**（走马灯）+ `3.2s / 预计 5.4s`
+- 到 `listening` 或 `/health` 200 收尾 → 立刻切回正常"生成中"
+- **失败也走这条**：解析日志里的 `error|failed|out of memory|invalid argument` → 红条 + **末 3 行日志**（这一步能省掉大量"为什么起不来"的来回）
+
+**顺手解决一个隐蔽问题**：加载完成后把 `n_ctx_slot` 和启动方案里的 `ctx` 对比 —— 若被**自适应降档阶梯**（`AUTO_KV_LADDER` / `auto_ctx`）静默改过，就在这里明示：`已按显存自动调整为 32K / q4_0 KV`。现在这个降档是"做了但没说"，用户会以为自己设的 128K 生效了。
+
+#### C.3 验收标准
+
+1. 加载 4B 时，UI 阶段与 `inst_8080.log` 的 6 个锚点**逐一对上**。
+2. 故意传非法参数（如 `-fit-target` 拼错）→ 3 秒内红条 + 末 3 行日志，而不是干等 120 秒超时。
+3. 预热过的模型（热缓存）从发消息到 ready 的感知延迟 < 1.5 s。
+4. 中文路径的模型也能正确解析阶段（`_decode_bytes` 回归测试）。
+
+---
+
+### D. 空闲卸载的可见性与控制（P1）
+
+#### D.0 竞品调研结论
+
+| 软件 | 默认 TTL | 可见性 | 可控性 |
+|---|---|---|---|
+| **Ollama** | **5 分钟**（正是我们 300 s 的出处） | `ollama ps` 的 **`UNTIL` 列**：`4 minutes from now` / **`Forever`** / `Stopping...`；API `/api/ps` 给绝对值 `expires_at` | 环境变量 `OLLAMA_KEEP_ALIVE`；**per-request** `keep_alive`（时长串 / 秒数 / 负值=永久 / `0`=立即卸）；`OLLAMA_MAX_LOADED_MODELS` 控制同时常驻几个 |
+| **LM Studio** | **60 分钟**（JIT 加载的模型） | 有当前加载模型列表 | ① 设置里的 app-default TTL；② per-request payload 的 `ttl`（秒）；③ `lms load --ttl`；④ **Auto-Evict**（默认开）：加载新模型前先卸掉之前 JIT 加载的 |
+
+**⇒ 行业共识有两条**：
+1. **一定要让用户看到"还有多久被卸"** —— Ollama 的 `UNTIL` 列就是标准答案。
+2. **一定要提供"永久常驻"选项** —— 两家都有，因为"常用的那个模型被卸掉"是真实的痛点。
+
+#### D.1 现状问题
+
+我们的看门狗 300 s 静默卸载，**用户回来只看到"模型没了"**。而且只有**全局** `instance.autostart`，**没法给单个常用模型开"别卸我"**。
+
+#### D.2 方案
+
+**后端**（`/api/instances` 增字段 + 2 个动作）：
+
+```jsonc
+{
+  "id": "a1b2c3d4",
+  "model": "Qwen3.5-4B-...-Q6_K.gguf",
+  "idle_ttl_secs": 300,
+  "idle_expires_at": 1758530000.0,   // epoch；pinned 时为 null
+  "pinned": false,
+  "unloaded_reason": null            // "idle_timeout" / "manual" / "replaced"
+}
+```
+
+- `POST /api/instances/{id}/pin` body `{pinned:true|false}` → 置 `pinned`，看门狗跳过（**对齐 Ollama 的 `keep_alive: -1`**）
+- `POST /api/instances/{id}/stop` → 立即卸载（**对齐 `keep_alive: 0`**）
+- 新增 `GET /api/events?since=<epoch>`：manager 维护一个**环形缓冲**（最近 100 条）记录生命周期事件（`loaded` / `unloaded` / `failed` / `auto_tuned`），前端轮询拿增量。
+
+**每模型 TTL 进 `LaunchConfig`**（现在是 9 字段 → **10 字段**）。⚠️ 记忆铁律：**每模型方案必须存整份字段**（别只存 ctx），加字段要同步改默认值与读写路径，否则老方案的 `undefined` 会变成 `0`（= 立即卸载）—— 这是个非常容易踩的坑，**必须默认 300 而不是 falsy 兜底**。
+
+**前端**：
+
+- 状态胶囊：`● 已加载 · 4:12 后自动卸载` / `● 常驻中` / `○ 未加载（上次：X）`
+- **右键菜单**（现有那个菜单已经存在，加两项）：`保持常驻` / `立即卸载` / `改自动卸载时长`
+- **toast 一次**：卸载发生时（且是空闲触发）提示「已为省显存卸载 X · 下次发消息自动拉起」。**只提示一次**，不是每次轮询都弹。
+- 设置项：`idle_ttl_secs`（默认 300，可选 5/15/30/60 分钟 / 永不）
+
+#### D.3 验收标准
+
+1. 打开应用 → 发一条消息 → 看到倒计时在走。
+2. 右键「保持常驻」→ 超过 300 s 模型仍在 → 胶囊显示「常驻中」。
+3. 真被卸掉时，界面上出现**恰好一次** toast，且再发消息能自动拉起（现有的 `ensureModelReady()` 已覆盖）。
+4. 改 TTL 为「永不」→ `idle_expires_at` 为 null 且看门狗不再动它。
+
+---
+
+### E. 一键基准 + 留档排行榜（P2）
+
+#### E.0 竞品调研结论
+
+| 来源 | 做法 |
+|---|---|
+| **`llama-bench`（官方，我们 `bin/` 里就有）** | `-p 512 -n 128 -r 5 -o json` → 输出 `pp512` / `tg128` **± 标准差**；可多模型/多参数一次跑完；`json/csv/md/jsonl` 多格式 |
+| **LM Studio** | 每条回复下面就给 `Tokens/second` / `Time to first token` / `Context used` —— **"测速结果贴着对话显示"** 是最省事的设计 |
+| **社区 benchmark 工具** | 会**把硬件和运行参数一起留档**（否则跨模型的数字没法比） |
+
+**方法论共识（这条最重要，抄下来）**：
+> **必须钉住：llama.cpp commit、CUDA 版本、模型+量化、ctx、batch/ubatch、线程数、重复次数；报 P50/P99 而不只是均值；丢弃预热轮。**
+
+#### E.1 我们的额外优势：日志里已经有测速数据
+
+`inst_8080.log` 里实测存在的行：
+
+```
+slot print_timing: id 0 | task 803 | n_gen = 1800, tg = 44.52 t/s, tg_3s = 44.08 t/s
+slot print_timing: prompt eval time =  99.48 ms / 26 tokens ( 3.83 ms per token, 261.37 tokens per second)
+slot print_timing:        eval time = 40362.92 ms / 1800 tokens ( 22.44 ms per token, 44.57 tokens per second)
+```
+
+**⇒ 不动实例、零副作用地拿到 tg/pp**，只要解析日志。这给了我们"轻量档"基准。
+
+#### E.2 方案：两档基准
+
+| 档 | 做法 | 精度 | 副作用 | 用途 |
+|---|---|---|---|---|
+| **轻量档**（默认） | 当前实例上发一条固定 prompt（例如 512 prefill + 128 gen），解析 `slot print_timing` | 近似（受上下文残留/缓存影响） | 无 | 日常"这台机器现在能跑多少" |
+| **严格档** | **先停实例**（腾显存）→ 调 `bin/llama-bench.exe -m <model> -p 512 -n 128 -r 5 -o json`，带上与启动方案一致的参数 → **测完自动恢复实例** | 高（官方工具 + 5 次重复 + 标准差） | 会短暂断服务（≈ 加载 + 30 s） | 换量化/调参后做严肃对比 |
+
+**留档**：`app/benchmarks.jsonl`（一行一条，方便 `jq`）
+
+```jsonc
+{ "ts": "2026-09-22T18:40:00+08:00",
+  "model": "Qwen3.5-4B-Uncensored...-Q6_K.gguf", "model_sha256_16": "8e0ae26000627ed6",
+  "file_size": 3462000000, "quant": "Q6_K", "arch": "qwen35", "n_layer": 36,
+  "ctx": 131072, "ctk": "f16", "ctv": "f16", "batch": 2048, "ubatch": 512,
+  "np": 1, "threads": 8, "flash_attn": true, "ngl": "auto(fit 512)",
+  "backend": "CUDA", "llama_build": "b10853", "gpu": "RTX 4070 Laptop 8GB",
+  "driver": "xxx.xx", "cuda": "13.2",
+  "pp512": 261.4, "tg128": 44.6, "tg_stdev": 0.5, "ttft_ms": 99,
+  "mode": "strict", "notes": "" }
+```
+
+**UI**：性能页「基准」区块 → 横向条形图（**这里用中性/主题色，不是涨红跌绿**）+ 按模型分组的历史曲线 + 「导出 JSONL / 复制到剪贴板」。
+
+**注意**：严格档要处理一个现实问题 —— **停实例会让模型从显存消失**，如果此时你在另一个窗口用 API，会断。所以：① 必须显式确认；② 测完自动恢复；③ 恢复失败要重试并告警。
+
+#### E.3 验收标准
+
+1. 同一模型连续两次严格档，`tg128` 差异 **< 5%**。
+2. 改 `ctk` 从 f16 → q4_0，`tg` 变化能被量出来并留档。
+3. 严格档结束后，`/api/instances` 里实例状态回到 `running`，`/props` 的 `model_path` 与测前一致。
+4. 留档里有 `llama_build` / `cuda` / `driver` 三项（没有这三项的数字不可比）。
+
+---
+
+### F. GPU 健康 / 归因面板（P2）
+
+#### F.0 竞品调研结论 + 上一轮的教训
+
+**`nvidia-smi` 的 `clocks_event_reasons` 七种原因，官方定义**：
+
+| 原因 | 含义 | 该怎么解读 |
+|---|---|---|
+| `SW Power Cap` | 撞**功耗墙**，驱动主动降频 | **正常**，说明卡在按设计工作；只有当功耗上限被设得低于出厂值才是问题 |
+| **`SW Thermal Slowdown`** | 温度超过最高工作温度，驱动降频 | **笔记本最常见的真凶**；反直觉的修法往往是**降功耗上限**（别在 boost/throttle 之间反复横跳） |
+| **`HW Thermal Slowdown`** | 硬件砍半频（≥2×） | **不是调参问题，是散热故障** |
+| `HW Power Brake` | 外部电源制动 | 笔记本上常见于**用电池**或**不达标的 USB-C 充电器** |
+| `Sync Boost` / `Idle` / `App Clocks` | 组内同步降频 / 空闲 / 应用锁频 | 视场景 |
+
+**方法论（多篇运维实践一致）**：
+- **单点采样会误判**，必须 `-l 1` 记整段生成过程的时序。
+- **平滑下滑并稳定 = 正常热平衡；断崖下跌 + HW Thermal = 自保；时钟没掉但速度掉了 = 不是热问题**（多半是上下文变长、KV 变大、或掉层）。
+- `HW Slowdown` 短瞬可无害，**持续 Active 才是故障**。
+
+**⚠️ 这里必须写上一轮的教训**：我们曾把「CPU 97~99 °C」当成抑制 GPU 功耗的原因 —— **错了**。对照实验证明 CPU 温度空载就是 88~98 °C（常量），而 GPU 在 CPU 99 °C 时仍满血吃 80~105 W、跑 **44.6~46.4 tok/s**、降频标志全 `Not Active`。
+**⇒ 所以面板绝对不能只甩数字。它要做的第一件事是"给基线、做对比、下结论"，而不是给一堆让人自己联想的仪表。**
+
+#### F.1 方案：「GPU 健康」卡片（性能页）
+
+**采集**（性能页轮询降频的同时新增）：
+
+```
+nvidia-smi --query-gpu=timestamp,power.draw,power.limit,temperature.gpu,
+            clocks.sm,clocks.mem,utilization.gpu,memory.used,memory.total,
+            clocks_event_reasons.active \
+            --format=csv -l 1
+```
+
+⚠️ **必须用 `nvidia-smi` 直查（实测 63 ms），不要走 PowerShell + WDDM 性能计数器（实测 1.1~1.7 s）** —— 后者是上一轮已经优化掉的开销。
+
+**展示三块**：
+
+1. **一行结论（绿/黄/红）+ 一句人话归因**
+   - 🟢 `功耗 105/115 W · 时钟 2.4 GHz · 无降频 → 机器正常，慢就不是机器的问题`
+   - 🟡 `SW Thermal Slowdown 持续 Active → 是过温降频；可试降压 / 清灰 / 换散热底座`
+   - 🔴 `HW Thermal Slowdown → 硬件在自保，散热有问题`
+   - 🟡 `HW Power Brake → 检查是不是在用电池或不达标的充电器`
+2. **最近 60 s 时序小图**：功耗 / 温度 / SM 时钟三条线 + 底部一条"降频原因"条带
+3. **「算一遍理论天花板」按钮**：
+   ```
+   期望 tok/s ≈ 显存带宽 ÷ 活动权重字节数 × 0.7
+   RTX 4070 Laptop ≈ 256 GB/s；4B Q6_K ≈ 3.3 GiB
+   → 理论上限 ≈ 75 tok/s；实测 45 → 效率 60%（正常区间）
+   ```
+   **把"慢"分成三类**：机器限额（跑满但就是慢）/ 配置不对（掉层、ctx 太大）/ 正常（已达带宽的 50~70%）。
+
+#### F.2 验收标准
+
+1. 人为切到 Windows 省电模式 / 用电池 → 面板从 🟢 变 🟡，并且归因文案会变（这是**唯一能自证"真的在读降频原因"**的测试）。
+2. 采集本身对 tok/s 的影响 < 2%（`nvidia-smi -l 1` 常驻子进程；不要每次轮询新起进程）。
+3. 面板结论与 `tools/diag/gpu_health.mjs` 手工跑出来的判读一致。
+
+---
+
+### G. 模型工具箱：量化 / 拆分 / 困惑度（P3，差异化）
+
+#### G.0 调研结论
+
+**这件事没人做。** LM Studio、Ollama、Jan、GPT4All 都只让你**下载**别人量化好的模型；想在本地自己量化，都得回到命令行。
+
+而我们 `bin/` 里**全套都有了**：
+
+| 工具 | 用途 | 业界做法 |
+|---|---|---|
+| `llama-quantize.exe` | GGUF 量化（f16 → Q4_K_M 等） | `llama-quantize model-f16.gguf model-Q4_K_M.gguf Q4_K_M` |
+| `llama-imatrix.exe` | 生成**重要性矩阵**（校准） | 需要 ~100 MB 领域代表性文本；**Q4 能改善 10~20% perplexity，Q3 以下必备** |
+| `llama-perplexity.exe` | 量化质量验证（wikitext-2 上的困惑度） | 数字越低越好；典型 Q4_K_M 相对 FP16 只 +2.9% |
+| `llama-gguf-split.exe` | 大模型拆分/合并 | 解决"单文件太大" |
+| `llama-tokenize.exe` | 分词检查 | 排查中文切词问题 |
+
+#### G.1 方案（谨慎版）
+
+**「量化」向导**（性能页 → 模型 → 右键菜单「量化此模型」）：
+
+1. 选源（f16 / Q8_0）+ 目标（Q4_K_M / Q5_K_M / Q6_K）
+2. 可选：`[ ] 用重要性矩阵提高质量`（需选一段校准文本）
+3. **预检**：`shutil.disk_usage` 检查是否有**源 + 目标 ≈ 2× 大小**的空间；不够就拒绝
+4. 后台任务（复用 §A 的任务框架）+ 进度（`llama-quantize` 自己会打百分比）+ **可取消**
+5. 完成后自动 `llama-perplexity` 对源与目标各跑一遍，**给出质量损失数字**（这一步是全套里最有价值的，因为它把"量化到底损失多少"从玄学变成数字）
+
+**⚠️ 风险**：量化 3 GB 要几分钟到半小时，且**磁盘瞬时翻倍**。所以这个功能要默认折叠、要显式确认、要能取消。
+
+#### G.2 验收标准
+
+1. 把一个 f16 模型量化到 Q4_K_M，产出文件能被 `/api/models` 认出且能正常加载对话。
+2. 取消任务后，`.part`/临时文件被清理，磁盘不残留。
+3. perplexity 对比能给出两个数字与百分比差。
+
+---
+
+### H. 工程卫生（P0）
+
+#### H.1 上 git（仓库已就位：`github.com/huankun05/llama_desk`，MIT，空）
+
+**为什么是 P0**：`D:\llama` **不是 git 仓库**，唯一的回滚手段是 `rollback\webui-built-*`（**只留最近 3 份**）。这是在悬崖边上工作。
+
+**仓库布局建议**：
+
+```
+llama_desk/
+├─ LICENSE                 ← 保留你已放的 MIT
+├─ README.md               ← 面向外部读者重写（现在是"内部笔记"口吻，含 D:\llama 硬路径）
+├─ docs/
+│  ├─ roadmap-v2.md        ← 本文件
+│  ├─ architecture.md      ← 从 diag/architecture-review.md 提炼（去掉一次性的实测数据）
+│  └─ gotchas.md           ← 那 6 个坑（对用户和贡献者都是硬知识）
+├─ app/                    ← Tauri 外壳（不含 src-tauri/target、.webview）
+├─ ui-src/
+│  ├─ overlay.js
+│  ├─ deploy.ps1
+│  ├─ work/                ← 不含 node_modules / .svelte-kit / dist
+│  └─ .overlay-version
+├─ webui/
+│  └─ manager.py           ← 核心资产，必须入库
+├─ tools/                  ← 全部辅助脚本
+└─ config.json.example     ← 从 app/config.json 生成（把绝对路径换成示例）
+```
+
+**`.gitignore`**（README §156 已经列了该忽略什么，这里落成文件）：
+
+```gitignore
+# 大文件与模型（GitHub 单文件上限 100MB，整个 models/ 49GB）
+models/
+bin/
+*.gguf
+*.part
+*.part.json
+*.imatrix
+
+# 构建产物
+ui-src/work/node_modules/
+ui-src/work/.svelte-kit/
+ui-src/work/dist/
+webui/_app/
+webui/index.html
+app/src-tauri/target/
+app/.webview/
+app/logs/
+webui/inst_*.log
+manager.log
+
+# 运行时/本地状态
+app/last-model.json
+app/fit-cache.json
+app/benchmarks.jsonl
+app/hf-token.txt
+rollback/
+backup/
+diag/
+shots/
+.ollama/
+```
+
+> ⚠️ **`webui/` 是混合目录** —— 里面既有 19 MB 构建产物（不该入库），又有 `manager.py`（2193 行核心源码，该入库）。
+> 三个处理方式见 §5 问题 1。**我的建议**：把 `manager.py` 挪到仓库根的 `backend/manager.py`（或 `webui/manager/` 包），`webui/` 整体 ignore。
+> 代价是 `app/config.json` 的 `manager_script` 要改一行 + 外壳重新 `cargo build`（所以顺手和 §C/§D 的后端改动一起做）。
+
+**提交与分支约定**（单人也要，因为你要"能回到昨天那个能跑的版本"）：
+
+- `main` = 始终可运行；每次动 `app/` 或 `manager.py` 前先 commit
+- 功能分支 `feat/<方向字母>-<短名>`（如 `feat-b-fit-badges`），做完合回 `main`
+- commit 前缀：`feat:` `fix:` `perf:` `docs:` `chore:` `refactor:`
+- **大文件绝不进 git，也不要用 LFS 存模型**（Git LFS 免费额度 1 GB 存储/月 —— 对 49 GB 毫无意义）。模型只写"去哪下"。
+
+**本机 git 的两个沙箱坑（已知，必须遵守）**：
+
+1. **绝不用 `git rm`** —— 上次执行 `git rm resources/icon/xiyue.svg`（只列了 7 个文件）后，**整个父目录 `resources/` 100+ 文件从工作区消失**。删被跟踪文件要用 `fs.unlinkSync` 逐文件删，再 `git add -A <dir>`。
+2. **无 husky 的仓库不要碰 `core.hooksPath`** —— `git config core.hooksPath ""` 会把 `.git/config` 写成全 NUL，所有 git 命令报 `fatal: bad config line 1`。这个仓库没有 husky → **直接 `git commit --no-verify`（需要时）即可，不要改 hooksPath**。
+
+#### H.2 拆 `manager.py`（2193 行单文件）
+
+**建议拆成包，但保留 shim**（这样 `config.json` 不用改、外壳不用重建）：
+
+```
+webui/manager.py            ← 3 行 shim：from manager_pkg.__main__ import main
+webui/manager_pkg/
+├─ __main__.py      启动/线程编排/端口守卫
+├─ gguf.py          parse_gguf(_cached) / kv_shape / guess_quant / prune
+├─ scan.py          _do_scan / _refresher / 硬链接去重 / mmproj 配对
+├─ fit.py           fit_plan / fit_mem / resolve_launch / AUTO_KV_LADDER
+├─ instances.py     start/stop/refresh / 空闲看门狗 / 端口管理
+├─ metrics.py       cpu/mem/gpu 原生命令 / 缓存线程 / gpu-cleanup
+├─ downloads.py     【新】§A 的下载器
+└─ http_api.py      Handler 路由表
+```
+
+配套：`tests/` 加 runner（现在 `tools/model/` 里 5 个测试脚本**没有 runner**，靠手工跑）→ 一个 `pytest` 或纯 `unittest` 的 `run_tests.py`。
+
+#### H.3 立刻能做的三条小修（`architecture-review.md` §4.3 已列）
+
+| # | 事项 | 收益 |
+|---|---|---|
+| 1 | **`open_path` 从 `/#/performance` 改回对话页** | 现在每次启动落**前端最大单文件**（2781 行）且 `onMount` 并发 5 个接口 |
+| 2 | **性能页轮询降频**（`loadSys/loadSlots` 每 2 s → 3~5 s，或改 SSE 推送） | 少一半 `nvidia-smi` 子进程 |
+| 3 | **启动时 `_do_scan()` 被跑两遍**（`__main__` 一次 + `_refresher` 首轮一次） | 一行守卫/注释 |
+| 4 | **降低 `parse_gguf` 的 Python 级分配**（跳过 tokenizer 的 `tokens`/`merges` 变长数组，现在单模型约 15 万个字符串对象、38 文件约 570 万次循环） | 冷扫描 3851 ms → 目标 <100 ms；顺带压低常驻内存 |
+| 5 | **0.7 GB 常驻的 Python 后端**（无人访问时工作集 738 MB 且稳定；探针已排除 import/扫描/线程/HTTP，差值 ~325 MB 未定位） | 用 `tracemalloc` 单独跑一次定位 |
+
+---
+
+## 4. 建议的落地顺序
+
+每批都是"能独立跑通、能独立验收"的，不会做完一半把自己卡住。
+
+### 第 0 批（半天 · 零风险 · 立刻回血）
+1. **H1 上 git**（`.gitignore` + 首次全量 commit + 推 GitHub）—— 从此有真正的回滚
+2. **H3 四条小修**（启动页 / 轮询降频 / 重复扫描 / `parse_gguf` 分配）
+3. **B-L1 列表徽章估算**（纯前端，当天可见）
+
+> 做完这批：有版本控制、首屏更快、模型列表能一眼看出"哪个能跑"。
+
+### 第 1 批（1~2 天 · 唤醒与等待的体验）
+4. **C 加载进度条**（阶段化 + 失败可见 + 静默降档公示）
+5. **D 卸载可见性与控制**（倒计时 + 常驻开关 + 事件 toast）
+6. **B-L2 后台精确预演缓存**（徽章从"估算"升级为"精确"）
+
+> 做完这批：**等待有解释、卸载有交代、徽章可信**。这是"体验提升"性价比最高的一批。
+
+### 第 2 批（2~3 天 · 把最后一个手动环节干掉）
+7. **A 应用内下载器**（先写 20 行探针验证 `Range` 在重定向后的行为，再动主体）
+8. **B-L3 显存预算条**
+
+> 做完这批：**从"想用某模型"到"跑起来"全程不出应用**。
+
+### 第 3 批（2 天 · 可观测性）
+9. **F GPU 健康 / 归因面板**
+10. **E 一键基准 + 留档**（轻量档先上，严格档后补）
+
+> 做完这批：**"慢"能被分类**（机器限额 / 配置不对 / 正常），而不是靠猜。
+
+### 第 4 批（按需 · 结构与差异化）
+11. **H2 拆 `manager.py` 包**（在动后端之前先拆，之后写代码更舒服）
+12. **G 量化工具箱**（perplexity 对比是重点）
+13. 模型标签 / 备注 / 收藏 / **删除**（破坏性，见问题 7）
+
+---
+
+## 5. 需要你拍板的 8 个问题
+
+| # | 问题 | 选项 | 我的建议 |
+|---|---|---|---|
+| **1** | **`webui/` 混合目录怎么处理**？（构建产物 19 MB 不该入库，但 `manager.py` 必须入） | ① `manager.py` 挪到 `backend/`，`webui/` 整体 ignore（要改 config + 重建外壳）② 白名单式 ignore（`webui/*` + `!webui/manager.py`…），目录不动 ③ 构建产物也入库（19 MB，不推荐） | **①**，但和 §C/§D 的后端改动**同批做**，只重建一次外壳 |
+| **2** | **`manager.py` 什么时候拆包？** | ① 第 4 批（先加功能后重构）② 第 0 批就拆（之后写代码更舒服，但要先写一轮回归测试） | **①**，功能优先；拆包前先补 `tests/` runner |
+| **3** | **下载器：标准库自研 vs 引入 `huggingface_hub`** | ① 自研（0 依赖，~350 行，无 `xet` 加速）② 引入依赖（有 `xet` 分块加速，实测有 3~5× 提速报告，但要装包 + 环境漂移） | **①**。manager 现在跑的是系统 `python`，引入包管理会把"零配置"这个优点弄丢 |
+| **4** | **要不要接 ModelScope 作为第二下载源？** | ① 只做 HF + `hf-mirror` ② 加 ModelScope（国内速度更好，但 API 非标、要多一套解析） | **先①**。`hf-mirror` 能不能满足国内速度，先在**你的实际网络**上测一次再定 |
+| **5** | **空闲卸载默认时长** | ① 保持 **300 s**（现状）② 跟 LM Studio 用 **60 min** ③ 默认「永不卸载」+ 提供手动卸 | **①改 ②**：8 GB 卡上"回到电脑前发现模型没了"比"多占 2 GB"更烦；但你是 8 GB 卡，**这条请你按体感定** |
+| **6** | **基准测试要不要做"先停实例"的严格档？** | ① 只做轻量档（零副作用，精度差）② 两档都做（严格档要短暂断服务 + 自动恢复） | **②**，但严格档必须显式确认 + 测完自动恢复 |
+| **7** | **要不要在应用内删除模型？**（49 GB 里躺着不少旧模型） | ① 不做，只给「在资源管理器里打开」② 做，但**必须**先移到回收站（不能直接删）+ 二次确认 + 显示释放多少空间 | **② 的谨慎版**：只允许删 `models/hf/` 下、非硬链接、且不在任何启动方案里的模型；**用回收站不用 `os.remove`** |
+| **8** | **这个仓库对外公开到什么程度？** | ① 就当私人仓库用（README 保留内部口吻）② 重写成面向外部的 README（去掉 `D:\llama` 硬路径、加架构图、加"如何不使用我的配置跑起来"）+ 第三方声明（llama.cpp MIT / 官方 WebUI MIT） | **②**：仓库是 public 的，而且 `docs/gotchas.md` 里那些坑对别人很有价值（那些恰恰是 llama.cpp WebUI 用户都会踩的） |
+
+---
+
+## 6. 附：本轮调研的原始依据
+
+**模型下载**
+- LM Studio 下载本地模型（可暂停/恢复/取消/重试）：`lmstudio.ai/docs/bionic/models/download-local-models`
+- LM Studio 兼容性徽章（绿=全 GPU / 黄=部分卸载 / 红=跑不动）：多方实测文一致描述
+- LM Studio `lms get author/repo@q4_k_m`：`beta.lmstudio.ai/blog/lmstudio-v0.3.5`
+- Ollama `pull` 分段进度 + 断点续传 + blob 去重 + 磁盘报错：Ollama 官方 CLI 文档
+- HF `hf_hub_download` / `snapshot_download` / `hf_transfer` / `xet` / `HF_ENDPOINT` 镜像 / 限速与 token：`huggingface.co/docs/huggingface_hub`
+- ModelScope `snapshot_download(allow_patterns=...)` / `model_file_download`：`modelscope.cn/docs/models/download`
+- Jan 的「From Hugging Face → Download & Add」流程、Open WebUI 的 "Pull a model" 输入框、text-generation-webui 的下载输入框：各自官方文档与实测文
+
+**显存与「能不能跑」**
+- LM Studio 三色徽章 + `--estimate-only`：LM Studio 文档 / markaicode GPU 优化教程
+- 显存四块拆分与"结论行"范式：calculatorbox / nexprotools / craftrigs 的 LLM VRAM 计算器
+- `可用 = 物理 × 0.90` + 20% 余量：《Why a 24 GB GPU Does Not Give Your Local LLM 24 GB》
+- KV 公式与 GQA（用 `n_kv_heads` 而非 attention heads）：HF Transformers KV cache 文档 + 多篇实践文
+
+**加载进度**
+- `/health` 的 503 `Loading model` / 200 `{"status":"ok"}`：llama.cpp server 官方端点文档
+- `load_tensors: offloaded N/M layers to GPU`：LM Studio 开发者日志与 llama.cpp server 日志同一格式
+- 本项目自己的 `webui/inst_8080.log`（6 个阶段锚点 + 时间戳）
+
+**空闲卸载**
+- Ollama `keep_alive` 默认 5 分钟、四种取值（时长串/秒数/负值=永久/0=立即）、`ollama ps` 的 `UNTIL` 列与 `/api/ps` 的 `expires_at`：Ollama 官方 FAQ 与 CLI 文档
+- LM Studio 默认 60 分钟 + Auto-Evict + per-request `ttl` + `lms load --ttl`：`lmstudio.ai/docs/developer/core/ttl-and-auto-evict`
+
+**基准**
+- `llama-bench` 的 `pp512`/`tg128`/`-r/-o json`/多模型多参数：llama.cpp 官方文档
+- 方法论（钉版本、报 P50/P99、丢预热轮）：多篇 benchmark 方法论文一致
+
+**GPU 健康**
+- `clocks_event_reasons` 七种原因的定义：NVIDIA `nvidia-smi` 官方文档（注意：新版把 `clocks_throttle_reasons` 改名为 `clocks_event_reasons`，旧名仍作别名）
+- 判读口诀（平滑下滑=正常热平衡；断崖+HW Thermal=自保；时钟没掉但速度掉=不是热问题）：`dev.to` 的笔记本热节流实测文 + `ai-infrastructure.net` 的功耗/时钟调优文
+
+**安全**
+- `CVE-2024-23496`（GGUF `gguf_fread_str` 堆溢出，CVSS 3.x 9.8）、`CVE-2025-53630`、`CVE-2026-33298`：NVD / Cisco Talos / SentinelOne
+- GGUF chat template 注入 + 供应链建议（钉 revision、校验 sha256、隔离首次加载）：CSA《Model Poisoning: Credential Exfiltration in Self-Hosted LLM Deployments》
+
+**仓库**
+- GitHub 单文件 100 MB 上限；Git LFS 免费额度（1 GB 存储/1 GB 月带宽）对大模型无意义：GitHub 官方文档 + 多篇实践文

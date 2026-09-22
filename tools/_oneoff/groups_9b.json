@@ -1,0 +1,26 @@
+[
+	{
+		"label": "① np=1 f16 KV b2048/512（你原来的配置）",
+		"cfg": { "ctx": 32768, "ctk": "f16", "ctv": "f16", "batch": 2048, "ubatch": 512, "np": 1 }
+	},
+	{
+		"label": "② np=1 q4_0 KV b512/128（方案A）",
+		"cfg": { "ctx": 32768, "ctk": "q4_0", "ctv": "q4_0", "batch": 512, "ubatch": 128, "np": 1 }
+	},
+	{
+		"label": "③ np=4 f16 KV b2048/512（多槽预设 = 4x32K）",
+		"cfg": { "ctx": 32768, "ctk": "f16", "ctv": "f16", "batch": 2048, "ubatch": 512, "np": 4 }
+	},
+	{
+		"label": "④ np=4 q4_0 KV b512/128（多槽 + 方案A）",
+		"cfg": { "ctx": 32768, "ctk": "q4_0", "ctv": "q4_0", "batch": 512, "ubatch": 128, "np": 4 }
+	},
+	{
+		"label": "⑤ np=1 q8_0 KV 128K 上下文（长上下文预设）",
+		"cfg": { "ctx": 131072, "ctk": "q8_0", "ctv": "q8_0", "batch": 512, "ubatch": 128, "np": 1 }
+	},
+	{
+		"label": "⑥ np=1 f16 KV b512/128（只缩 batch）",
+		"cfg": { "ctx": 32768, "ctk": "f16", "ctv": "f16", "batch": 512, "ubatch": 128, "np": 1 }
+	}
+]

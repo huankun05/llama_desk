@@ -1,0 +1,93 @@
+# ════════════════════════════════════════════════════════════
+#  llama-desk · .gitignore
+#
+#  原则：源码 / 脚本 / 文档 / 截图入库；
+#        模型权重、官方二进制、构建产物、运行时状态、上游参考副本
+#        一律不入库（都能从上游或本地重新生成）。
+#
+#  体积参考（入库前）：
+#    models/ 49GB · app/src-tauri/target 3.9GB · bin/ 1.1GB
+#    ui-src/work/node_modules 589MB · rollback/ 37MB · webui 产物 19MB
+# ════════════════════════════════════════════════════════════
+
+# ── ① 模型权重（49 GB；GitHub 单文件硬上限 100 MB）───────────────
+/models/
+/.ollama/
+
+# ── ② llama.cpp 官方二进制发行包（1.1 GB，换版本就换这个目录）────
+/bin/
+
+# ── ③ Tauri / Rust 构建产物（3.9 GB，可 cargo build 重建）────────
+/app/src-tauri/target/
+/app/src-tauri/gen/
+/app/.webview/
+
+# ── ④ 运行时日志与状态（本机数据，非源码）───────────────────────
+/app/logs/
+/app/last-model.json
+/app/config.json.bak-*
+
+# ── ⑤ 前端依赖与构建产物 ───────────────────────────────────────
+/ui-src/work/node_modules/
+/ui-src/work/.svelte-kit/
+/ui-src/work/dist/
+/ui-src/work/build/
+/ui-src/work/dev-dist/
+/ui-src/work/.output/
+/ui-src/work/test-results/
+/ui-src/work/vite.config.ts.timestamp-*
+/ui-src/work/vite.config.js.timestamp-*
+/ui-src/work/static/favicon*
+/ui-src/work/apple-splash-*.png
+/ui-src/work/apple-touch-icon-*.png
+/ui-src/work/maskable-icon-*.png
+/ui-src/work/pwa-*.png
+
+# ── ⑥ 上游 llama.cpp UI 参考副本（22 MB / 2350 文件）────────────
+#     这三份都是**未修改**的官方 b10853 解包副本，只作 diff 基准与参考。
+#     需要时重新解包官方包即可 —— 不入库，免得仓库被上游文件淹没。
+/ui-src/b10853/
+/ui-src/official/
+/ui-src/work/ui/
+
+# ── ⑦ WebUI 部署产物（deploy.ps1 会整体重建，别手改）────────────
+#     保留入库的是自研件：manager.py / overlay.js / *.bat / _dumpsettings.js
+/webui/_app/
+/webui/static/
+/webui/backup/
+/webui/recommended-mcp/
+/webui/__pycache__/
+/webui/build.json
+/webui/index.html
+/webui/manifest.webmanifest
+/webui/sw.js
+/webui/workbox-*.js
+/webui/*.png
+/webui/inst_*.log
+
+# ── ⑧ 回滚点 / 应用内备份（本机状态）───────────────────────────
+/rollback/
+/backup/
+
+# ── ⑨ Python ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# ── ⑩ 日志 / 临时文件 ────────────────────────────────────────
+*.log
+*.tmp
+*.swp
+*~
+
+# ── ⑪ 编辑器 / 系统 ──────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── ⑫ AI 工作目录（内部笔记 / 会话产物，非项目源码）──────────────
+/.workbuddy/

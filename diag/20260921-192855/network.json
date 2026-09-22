@@ -1,0 +1,450 @@
+{
+  "totalKB": 20,
+  "count": 44,
+  "statusTally": {
+    "200": 43,
+    "403": 1
+  },
+  "rows": [
+    {
+      "status": 200,
+      "KB": 1,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8090/api/system-metrics"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-53\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/entry/start.C88AbHSV.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-726d\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/Byd7IvGc.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab0fdad-90ce\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/V-mWrnOC.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-169a\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/entry/app.zhWuM0PW.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab0fdad-1962\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/jR8pfCnT.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-17389\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/nodes/0.SULxf-Xi.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-d228b\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/DprcE01l.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab0fdad-189\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/BnAPb9ZQ.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-17266c\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/D396NRWa.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-34d\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/CfbAs76S.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-820b\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/C_hjcRd7.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-90a\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/DH2XeryL.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-86b\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/DExfGPuo.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab0fdad-41\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/D6zefAXp.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/css",
+      "cacheControl": "",
+      "etag": "W/\"6ab0fdad-37\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/assets/launch-presets.DpTeXGru.css"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/css",
+      "cacheControl": "",
+      "etag": "W/\"6ab0fdad-5f877\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/assets/SidebarNavigationConversationItem.BL0ovgOQ.css"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/css",
+      "cacheControl": "",
+      "etag": "W/\"6ab0fdac-159\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/assets/use-keyboard-shortcuts.bHHIbcsu.css"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/css",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-26873\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/assets/0.BRtF1QIR.css"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "-",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab112e6-159b4\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/overlay.js?v=39"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/html",
+      "cacheControl": "",
+      "etag": "W/\"6ab106f1-36b7\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-23a2\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/nodes/1.BpuCabTD.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-4799b\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/nodes/2.D4MuFu0M.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-255\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/BxKeQmxq.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-37f\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/OQuWrXUy.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-101f1\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/nodes/6.CgK4aBai.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab106ab-2da\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/BcdEAdMC.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab0fdad-fd5e3\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/BgqLDpB2.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "text/javascript",
+      "cacheControl": "",
+      "etag": "W/\"6ab0fdad-1674\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/immutable/chunks/BBnX5xw4.js"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "image/svg+xml",
+      "cacheControl": "",
+      "etag": "W/\"6aa17898-320\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/favicon.svg"
+    },
+    {
+      "status": 200,
+      "KB": 1,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8090/api/system-metrics"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/slots"
+    },
+    {
+      "status": 200,
+      "KB": 11,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/props?autoload=false"
+    },
+    {
+      "status": 200,
+      "KB": 5,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8090/api/models"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8090/api/instances"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "W/\"6ab106b5-13\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/build.json"
+    },
+    {
+      "status": 403,
+      "KB": 0,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/tools"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "-",
+      "mime": "image/svg+xml",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='oklch(55.1%25 0.027 264.364)' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "-",
+      "mime": "image/svg+xml",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "data:image/svg+xml,%3csvg viewBox='0 0 16 16' fill='white' xmlns='http://www.w3.org/2000/svg'%3e%3cpath d='M12.207 4.793a1 1 0 010 1.414l-5 5a1 1 0 01-1.414 0l-2-2a1 1 0 011.414-1.414L6.5 9.086l4.293-4.293a1 1 0 011.414 0z'/%3e%3c/svg%3e"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "disk",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "W/\"6ab106a9-1b\"",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/_app/version.json"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/v1/streams/lookup"
+    },
+    {
+      "status": 200,
+      "KB": 0,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8080/slots"
+    },
+    {
+      "status": 200,
+      "KB": 1,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8090/api/gpu-cleanup"
+    },
+    {
+      "status": 200,
+      "KB": 1,
+      "cache": "-",
+      "mime": "application/json",
+      "cacheControl": "",
+      "etag": "",
+      "contentEncoding": "",
+      "url": "http://127.0.0.1:8090/api/system-metrics"
+    }
+  ]
+}

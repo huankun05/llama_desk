@@ -1,0 +1,7 @@
+# Qwen3.5-9B "The Defiant Fable" (Uncensored / Heretic, NEO-IMATRIX Q4_K_M)
+# 底座: Qwen3.5-9B (9B, 原生视觉+256K上下文); Apache-2.0
+FROM D:/llama/models/from-ollama/qwen3.5-9b-defiant-latest.gguf
+
+# 默认上下文窗口。模型原生支持 256K，但 8GB 显存下大窗口会部分卸载到内存。
+# 想要更长上下文时，运行时用 `ollama run --num_ctx 65536` 覆盖即可。
+PARAMETER num_ctx 16384

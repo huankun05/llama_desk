@@ -1,0 +1,46 @@
+{
+  "_说明": "llama-desk 外壳配置。改完直接重启应用生效。instance.autostart=false（默认）时，应用启动只起一个「零模型哨兵」（llama-server 的 router 模式，不加载任何权重，几乎不占显存），模型由界面在首次对话时按需加载；设为 true 则沿用旧行为（启动即加载 instance.model）。模型目录见 D:/llama/models/from-ollama。",
+
+  "llama_server": "D:/llama/bin/llama-server.exe",
+  "webui_dir": "D:/llama/webui",
+  "python": "python",
+  "manager_script": "D:/llama/webui/manager.py",
+  "log_dir": "D:/llama/app/logs",
+  "webview_data_dir": "D:/llama/app/.webview",
+
+  "host": "127.0.0.1",
+  "llama_port": 8080,
+  "manager_port": 8090,
+
+  "start_manager": true,
+  "close_to_tray": true,
+  "ready_timeout_secs": 180,
+  "window_timeout_secs": 25,
+  "browser_fallback": true,
+  "auto_update_llama_cpp": false,
+  "open_path": "/#/performance",
+  "window_width": 1280.0,
+  "window_height": 820.0,
+
+  "instance": {
+    "autostart": false,
+    "model": "D:/llama/models/MiniCPM5-2B-Q4_K_M.gguf",
+    "alias": "minicpm5-2b",
+    "ctx": 32768,
+    "ctk": "",
+    "ctv": "",
+    "np": 4,
+    "kv_unified": true,
+    "ngl": 99,
+    "flash_attn": "on",
+    "threads": 8,
+    "batch": 2048,
+    "ubatch": 512,
+    "temp": 0.6,
+    "top_p": 0.9,
+    "min_p": 0.05,
+    "repeat_penalty": 1.05,
+    "n_predict": 2048,
+    "no_reasoning_preserve": true
+  }
+}
