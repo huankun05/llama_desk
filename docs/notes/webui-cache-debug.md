@@ -69,3 +69,19 @@
   `diag_ls.mjs` 扫 LevelDB 值是 UTF-16LE 且对齐可能落在**奇数位**。
 - 项目内 Playwright 工具：`tools/ui/{i18n_audit,ui_probe,cache_probe,cleanup_ui_check}.mjs`，
   必须显式给 `executablePath: …/ms-playwright/chromium-1243/chrome-win64/chrome.exe`。
+
+## 7. ⭐ 应用没在跑时怎么验证 WebUI（可复用工作流）
+
+1. `8080` 上直接起**真实哨兵**：
+   `cd /d/llama/bin && ./llama-server.exe -t 8 --host 127.0.0.1 --port 8080 --path D:/llama/webui`
+   （参数与 `app/src-tauri/src/supervisor.rs::spawn_llama` 的 `autostart=false` 分支**逐字一致**）。
+2. `8090` 上复用**真实 manager** —— 它**不随外壳退出而消失**（实测外壳关了它还在跑）。
+3. 探针用项目内 Playwright（如 `tools/ui/badge_probe.mjs`），**不能用 agent-browser**。
+4. ⚠️ 只起静态服务（`python -m http.server`）**不行**：`/props` 会 404 → `serverStore` 空 →
+   模型下拉按钮 `disabled` 点不开。**必须有真的 llama-server。**
+5. ⚠️ 探针里找按钮别只匹配英文：overlay 会把 "Select model" 翻成「选择模型」。
+6. `page.route('**/api/models')` 注入字段可模拟「重启后的新 manager」→ 一个脚本同时验证
+   过渡期降级与三色判定（`tools/ui/badge_probe.mjs --inject`）。
+7. ⚠️⚠️ **验证完必须停掉自己起的进程，并且清掉 8090**：否则用户重启应用时新 manager 因端口被占
+   `sys.exit(1)`，用户拿到的还是**旧代码**（踩过：8090 一直挂着旧 manager，徽章全是「待预演」）。
+   杀端口占用：`Get-NetTCPConnection -LocalPort N -State Listen` → `Stop-Process -Force`。
