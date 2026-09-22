@@ -118,7 +118,7 @@ impl Default for AppConfig {
             window_timeout_secs: 25,
             browser_fallback: true,
             auto_update_llama_cpp: false,
-            open_path: "/#/performance".into(),
+            open_path: "/#/".into(),
             window_width: 1280.0,
             window_height: 820.0,
             instance: Instance::default(),

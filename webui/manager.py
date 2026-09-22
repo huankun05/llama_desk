@@ -48,14 +48,25 @@ def parse_gguf(path, limit=32*1024*1024):
     out = {}
     # 定长元素的字节数（数组跳步用）；str / arr 是变长的，必须逐个读。
     FIXED = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:4, 7:1, 10:8, 11:8, 12:8}
+    # 用 struct.unpack_from 直接在缓冲上取值，**不做 head[p:p+8] 切片**。
+    # 解析 tokenizer 数组时要走几十万次，切片分配是仅次于解码的第二大头。
+    import struct
+    uf_u64 = struct.Struct("<Q").unpack_from
+    uf_u32 = struct.Struct("<I").unpack_from
     def rd_u64():
         nonlocal p
-        v = int.from_bytes(head[p:p+8], "little"); p += 8; return v
+        v = uf_u64(head, p)[0]; p += 8; return v
     def rd_u32():
         nonlocal p
-        v = int.from_bytes(head[p:p+4], "little"); p += 4; return v
-    def rd_val(vtype):
+        v = uf_u32(head, p)[0]; p += 4; return v
+    def rd_val(vtype, skip=False):
         """读一个值并推进 p。
+
+        `skip=True` 时**只推进指针、不构造值** —— 数组元素一律用它。
+        这是冷扫描里最大的一笔省：`tokenizer.ggml.tokens` 单模型约 15 万个字符串，
+        而数组的返回值本来就是 `<array x%d>` 占位符、谁也不看，
+        逐个 `decode("utf-8")` 纯属白烧 CPU（38 个文件累计约 570 万次循环）。
+        注意：仅跳过「构造」，**指针推进逻辑一字未动** —— 解析结果与原来逐字节一致。
 
         数组必须**按元素类型逐个真实跳过**：tokenizer 的 tokens / merges 是
         变长字符串数组，早期实现按「估算元素大小 × 个数」跳，指针会错位，
@@ -69,6 +80,9 @@ def parse_gguf(path, limit=32*1024*1024):
         nonlocal p
         if vtype == 8:  # string
             n = rd_u64()
+            if skip:
+                p += n          # 只跳过，不解码（省掉整段 UTF-8 解码）
+                return ""
             s = head[p:p+n].decode("utf-8", "replace"); p += n
             return s
         if vtype in (0,1,2,3,4,5):  # 8/16/32 位整数
@@ -91,9 +105,10 @@ def parse_gguf(path, limit=32*1024*1024):
                     raise ValueError("array overrun")
                 p += step
             else:
-                # 变长元素（字符串/嵌套数组）：只能逐个读
+                # 变长元素（字符串/嵌套数组）：只能逐个读。
+                # 但元素值**一律不要**（外层只返回 `<array xN>` 占位符）→ skip=True。
                 for _ in range(cnt):
-                    rd_val(subtype)
+                    rd_val(subtype, skip=True)
             return "<array x%d>" % cnt
         raise ValueError("unknown gguf vtype %r" % vtype)
     for _ in range(kv_count):
@@ -379,10 +394,12 @@ def get_models():
         return _model_cache["data"]
 def _refresher(interval=30.0):
     # 后台周期刷新缓存（冷扫描 ~10s，在独立线程内，不阻塞 GET）
+    # ⚠️ 必须**先 sleep 再扫**：`__main__` 启动时已经 `_do_scan()` 预热过一次，
+    #    若这里进循环体立刻再扫，就是启动时白读两遍盘（实测冷扫描 3851ms / 1216MB）。
     while True:
+        time.sleep(interval)
         try: _do_scan()
         except Exception: pass
-        time.sleep(interval)
 
 # ---------- 端口接管：换模型前先腾出端口 ----------
 # 背景：llama-server 也可能由 llama-desk 外壳（config.json 的 instance.model）

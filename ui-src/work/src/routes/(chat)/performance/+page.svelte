@@ -392,6 +392,22 @@
 	let sysTimer: ReturnType<typeof setInterval> | null = null;
 	let mgrTimer: ReturnType<typeof setInterval> | null = null;
 	let currentRefreshMs = 2000;
+	/**
+	 * 页面在后台时**不发请求**：本页有两路轮询（系统指标 2s、manager 5s），
+	 * 而切到别的路由或把窗口最小化之后，这些数字用户根本看不见 ——
+	 * 白烧 CPU（`/api/system-metrics` 每次都要走 ctypes 取 CPU/GPU）。
+	 * 回到前台时由 `visibilitychange` 立刻补一次，数字不会停在旧值。
+	 */
+	function tickSys() {
+		if (document.hidden) return;
+		loadSys();
+		loadSlots();
+	}
+	function onPageVisible() {
+		if (document.hidden) return;
+		loadSys();
+		loadSlots();
+	}
 	onMount(() => {
 		cores = navigator.hardwareConcurrency || 0;
 		loadSections();
@@ -403,22 +419,18 @@
 		loadSys();
 		loadSlots();
 		void loadCleanup();
-		sysTimer = setInterval(() => {
-			loadSys();
-			loadSlots();
-		}, currentRefreshMs);
+		sysTimer = setInterval(tickSys, currentRefreshMs);
+		document.addEventListener('visibilitychange', onPageVisible);
 		return () => {
 			if (sysTimer) clearInterval(sysTimer);
+			document.removeEventListener('visibilitychange', onPageVisible);
 		};
 	});
 	$effect(() => {
 		if (sysTimer && refreshMs !== currentRefreshMs) {
 			currentRefreshMs = refreshMs;
 			clearInterval(sysTimer);
-			sysTimer = setInterval(() => {
-				loadSys();
-				loadSlots();
-			}, Math.max(250, refreshMs));
+			sysTimer = setInterval(tickSys, Math.max(250, refreshMs));
 		}
 	});
 
@@ -758,11 +770,21 @@
 		}
 	}
 
+	/** manager 侧轮询同理：页面在后台就不发请求（见上面 tickSys 的说明）。 */
+	function tickMgr() {
+		if (document.hidden) return;
+		void loadMgr();
+	}
 	onMount(() => {
 		loadMgr();
-		mgrTimer = setInterval(loadMgr, 5000);
+		mgrTimer = setInterval(tickMgr, 5000);
+		const onVis = () => {
+			if (!document.hidden) void loadMgr();
+		};
+		document.addEventListener('visibilitychange', onVis);
 		return () => {
 			if (mgrTimer) clearInterval(mgrTimer);
+			document.removeEventListener('visibilitychange', onVis);
 		};
 	});
 
