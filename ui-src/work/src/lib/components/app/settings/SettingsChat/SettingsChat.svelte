@@ -7,6 +7,7 @@
 		SettingsChatImportExportTab,
 		SettingsChatMobileHeader,
 		SettingsChatToolsTab,
+		SettingsMcpServers,
 		SettingsFooter
 	} from '$lib/components/app/settings';
 	import { Button } from '$lib/components/ui/button';
@@ -165,6 +166,15 @@
 				<div class="grid">
 					{#if currentSection.slug === SETTINGS_SECTION_SLUGS.TOOLS}
 						<SettingsChatToolsTab />
+					{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.MCP_SERVERS}
+						<!--
+							MCP 服务器管理原本只能从聊天表单里的一个小按钮弹出浮窗，
+							设置页里根本看不到入口。这里直接复用现成组件作为一整栏 ——
+							它本来就是按「整栏/整页」排版的（卡片列表 + 空态居中）。
+						-->
+						<div class="flex min-h-[26rem] flex-col">
+							<SettingsMcpServers />
+						</div>
 					{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.IMPORT_EXPORT}
 						<SettingsChatImportExportTab />
 					{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.BACKUP}

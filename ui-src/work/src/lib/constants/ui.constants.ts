@@ -54,6 +54,14 @@ export const ICON_STRIP_TRANSITION_DELAY_MULTIPLIER = 50;
 /** Max height for tool-result code blocks (json / source / diff / streaming code). */
 export const MAX_HEIGHT_CODE_BLOCK = '22rem';
 
+/**
+ * 侧栏图标条的动作项。
+ *
+ * ⚠️ 带 `route` 的项必须同时给 `activeUrlIncludes`：本项目页面全是 hash 路由
+ * （`ROUTES.X` 形如 `#/performance`），hash 变化**不会**改变 `page.route.id`，
+ * 所以 `isItemActive()` 里靠 route.id 的两条分支对本应用恒为 false ——
+ * 少写 `activeUrlIncludes` 的结果就是「点了能跳，但永远不高亮」。
+ */
 export const SIDEBAR_ACTIONS_ITEMS: DesktopIconStripItem[] = [
 	{
 		action: SidebarAction.NEW_CHAT,
@@ -65,16 +73,19 @@ export const SIDEBAR_ACTIONS_ITEMS: DesktopIconStripItem[] = [
 	{
 		icon: Gauge,
 		route: ROUTES.PERFORMANCE,
-		tooltip: 'Performance'
+		tooltip: 'Performance',
+		activeUrlIncludes: ROUTES.PERFORMANCE
 	},
 	{
 		icon: SlidersHorizontal,
 		route: ROUTES.PARAMETERS,
-		tooltip: 'Parameters'
+		tooltip: 'Parameters',
+		activeUrlIncludes: ROUTES.PARAMETERS
 	},
 	{
 		icon: Settings,
 		route: ROUTES.SETTINGS,
-		tooltip: 'Settings'
+		tooltip: 'Settings',
+		activeUrlIncludes: ROUTES.SETTINGS
 	}
 ];

@@ -11,11 +11,11 @@ import {
 	Monitor,
 	Moon,
 	PencilRuler,
+	Plug,
 	SlidersVertical,
 	Sun,
 	Gauge,
-	HardDrive,
-	Timer
+	HardDrive
 } from '@lucide/svelte';
 import { SyncableParameterType } from '$lib/enums';
 import { SettingsFieldType } from '$lib/enums/settings.enums';
@@ -35,6 +35,7 @@ export const SETTINGS_SECTIONS = {
 	DISPLAY: { slug: 'display', title: 'Display' },
 	GENERAL: { slug: 'general', title: 'General' },
 	IMPORT_EXPORT: { slug: 'import-export', title: 'Import/Export' },
+	MCP_SERVERS: { slug: 'mcp-servers', title: 'MCP Servers' },
 	PERFORMANCE: { slug: 'performance', title: 'Performance' },
 	SAMPLING_PENALTIES: { slug: 'sampling-penalties', title: 'Sampling & Penalties' },
 	TOOLS: { slug: 'tools', title: 'Tools' },
@@ -47,6 +48,7 @@ export const SETTINGS_SECTION_SLUGS = {
 	DISPLAY: SETTINGS_SECTIONS.DISPLAY.slug,
 	GENERAL: SETTINGS_SECTIONS.GENERAL.slug,
 	IMPORT_EXPORT: SETTINGS_SECTIONS.IMPORT_EXPORT.slug,
+	MCP_SERVERS: SETTINGS_SECTIONS.MCP_SERVERS.slug,
 	PERFORMANCE: SETTINGS_SECTIONS.PERFORMANCE.slug,
 	SAMPLING_PENALTIES: SETTINGS_SECTIONS.SAMPLING_PENALTIES.slug,
 	TOOLS: SETTINGS_SECTIONS.TOOLS.slug,
@@ -59,6 +61,7 @@ export const SETTINGS_SECTION_TITLES = {
 	DISPLAY: SETTINGS_SECTIONS.DISPLAY.title,
 	GENERAL: SETTINGS_SECTIONS.GENERAL.title,
 	IMPORT_EXPORT: SETTINGS_SECTIONS.IMPORT_EXPORT.title,
+	MCP_SERVERS: SETTINGS_SECTIONS.MCP_SERVERS.title,
 	PERFORMANCE: SETTINGS_SECTIONS.PERFORMANCE.title,
 	SAMPLING_PENALTIES: SETTINGS_SECTIONS.SAMPLING_PENALTIES.title,
 	TOOLS: SETTINGS_SECTIONS.TOOLS.title,
@@ -327,21 +330,29 @@ export const SETTINGS_REGISTRY: SettingsSectionEntry[] = [
 		slug: SETTINGS_SECTION_SLUGS.DISPLAY,
 		title: SETTINGS_SECTION_TITLES.DISPLAY
 	},
-	// MCP Servers (non-UI config object)
+	// Tools — 整栏由 SettingsChatToolsTab 渲染（工具开关列表），不需要逐字段表单
 	{
 		icon: PencilRuler,
+		settings: [],
+		slug: SETTINGS_SECTION_SLUGS.TOOLS,
+		title: SETTINGS_SECTION_TITLES.TOOLS
+	},
+	// MCP Servers — 整栏由 SettingsMcpServers 渲染（服务器卡片 + 健康检查 + 添加）
+	// 唯一的字段是非 UI 的 JSON 配置对象，standaloneField:false 不渲染表单。
+	{
+		icon: Plug,
 		settings: [
 			{
 				defaultValue: '[]',
-				help: 'Configure MCP servers as a JSON list. Use the form in the MCP Client settings section to edit.',
+				help: 'Configure MCP servers as a JSON list. Use the MCP Servers panel to edit.',
 				key: SETTINGS_KEYS.MCP_SERVERS,
 				label: 'MCP servers',
 				standaloneField: false,
 				type: SettingsFieldType.INPUT
 			}
 		],
-		slug: SETTINGS_SECTION_SLUGS.TOOLS,
-		title: SETTINGS_SECTION_TITLES.TOOLS
+		slug: SETTINGS_SECTION_SLUGS.MCP_SERVERS,
+		title: SETTINGS_SECTION_TITLES.MCP_SERVERS
 	},
 	// Tools
 	{
@@ -743,8 +754,26 @@ function toSettingsSection(section: SettingsSectionEntry): SettingsSection {
 	};
 }
 
+/**
+ * 不出现在设置页导航里的分节。
+ *
+ * ⚠️ 这些节的「字段定义」必须留在 SETTINGS_REGISTRY 里 ——
+ * SETTING_CONFIG_DEFAULT / SETTING_CONFIG_INFO / NUMERIC_FIELDS /
+ * POSITIVE_INTEGER_FIELDS 全部由它派生，直接删节会让这些键丢掉默认值与校验元数据
+ * （老 localStorage 里的值也就没了兜底）。所以只从设置页导航里摘掉，
+ * 字段改由专属页面承载：
+ *
+ * - sampling-penalties → `#/parameters`：调参主场在那里。两处都能改同一份
+ *   SETTINGS_REGISTRY 数据属于「一件事两个入口」，容易让人不知道该改哪边。
+ */
+export const SETTINGS_SLUGS_HIDDEN_FROM_PAGE: ReadonlySet<string> = new Set([
+	SETTINGS_SECTION_SLUGS.SAMPLING_PENALTIES
+]);
+
 /** Sidebar sections in custom display order (the registry array order). */
-export const SETTINGS_CHAT_SECTIONS: SettingsSection[] = SETTINGS_REGISTRY.map(toSettingsSection);
+export const SETTINGS_CHAT_SECTIONS: SettingsSection[] = SETTINGS_REGISTRY.filter(
+	(section) => !SETTINGS_SLUGS_HIDDEN_FROM_PAGE.has(section.slug)
+).map(toSettingsSection);
 
 /** INPUT-type settings whose value is a number. */
 export const NUMERIC_FIELDS = getAllSettings()
