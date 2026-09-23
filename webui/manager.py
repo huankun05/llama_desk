@@ -21,6 +21,9 @@ WEBUI_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIRS = [
     os.path.join(WEBUI_DIR, "..", "models"),
     os.path.join(WEBUI_DIR, "..", "models", "from-ollama"),
+    # 第 2 批 A：应用内下载器落盘目录（HF 下载的 GGUF 放这，扫盘自动收录）。
+    # 既是 MODEL_DIRS 的一员，又因为 os.walk 递归，models/ 自己也会扫到它。
+    os.path.join(WEBUI_DIR, "..", "models", "from-hf"),
 ]
 LLAMA_SERVER = os.path.join(WEBUI_DIR, "..", "bin", "llama-server.exe")
 PORT = 8090
@@ -2374,6 +2377,199 @@ IMMUTABLE_PREFIXES = ("/_app/immutable/", "/static/")
 
 
 # ---------- HTTP 处理 ----------
+# ============================================================
+# 第 2 批 A：应用内下载器（HuggingFace，纯标准库，零第三方依赖）
+#  - /api/hf-search   ?q=        搜 GGUF 模型仓库（HF API，按下载量排序）
+#  - /api/hf-files    ?repo=     取某仓库的 .gguf 文件清单 + 大小（?blobs=true 一次请求）
+#  - /api/hf-download POST       断点续传下载（后台线程，支持进度 / 取消）
+#  - /api/hf-download/<id>       GET 进度
+#  - /api/hf-download/<id>/cancel POST 取消
+#  - /api/hf-downloads           列出全部任务（前端刷新后恢复）
+#
+# ⚠️ 续传机制见 tools/model/hf_range_probe.py：HF 的 resolve URL 会 302 重定向到 CDN，
+#    urllib 在重定向时**默认不**把 Range 带到重定向请求上 —— 这里手动捕获 Location
+#    并重发带 Range 的请求（实测 get 206 + 仅返回尾部），兼容所有 Python 版本。
+# ============================================================
+HF_API = "https://huggingface.co/api"
+HF_HEADERS = {"User-Agent": "llama-desk/1.0"}
+HF_JOBS = {}                       # job_id -> dict（线程安全的任务表）
+HF_JOBS_LOCK = threading.Lock()
+
+
+class _HFNoRedirect(urllib.request.HTTPRedirectHandler):
+    """不自动跟重定向，只为拿到 Location（我们要手动重发 Range）。"""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def hf_http_json(url, timeout=20):
+    req = urllib.request.Request(url, headers=HF_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def hf_search(q, limit=20):
+    """搜 GGUF 仓库。q 为空时返回按下载量排序的热门 GGUF 仓库（浏览用）。"""
+    try:
+        limit = max(1, min(int(limit), 50))
+    except (TypeError, ValueError):
+        limit = 20
+    try:
+        qstr = urllib.parse.quote(q) if q else ""
+        url = "%s/models?search=%s&limit=%d&sort=downloads&direction=-1" % (HF_API, qstr, limit)
+        data = hf_http_json(url)
+    except Exception:
+        return []
+    out = []
+    for m in data:
+        tags = [str(t).lower() for t in (m.get("tags") or [])]
+        if "gguf" not in tags:
+            continue
+        out.append({
+            "id": m.get("id"),
+            "downloads": m.get("downloads") or 0,
+            "likes": m.get("likes") or 0,
+            "lastModified": m.get("lastModified"),
+        })
+    return out
+
+
+def hf_files(repo):
+    """取某仓库的 .gguf 文件清单 + 大小（一次 ?blobs=true 请求）。"""
+    try:
+        data = hf_http_json("%s/models/%s?blobs=true" % (HF_API, repo), timeout=25)
+    except Exception:
+        return []
+    out = []
+    for s in (data.get("siblings") or []):
+        fn = s.get("rfilename") or ""
+        if not fn.lower().endswith(".gguf"):
+            continue
+        size = (s.get("lfs") or {}).get("size") or 0
+        is_mmproj = ("mmproj" in fn.lower()) or ((s.get("lfs") or {}).get("is_mmproj") is True)
+        out.append({
+            "filename": fn,
+            "size_bytes": size,
+            "size_gb": round(size / 1024 ** 3, 2),
+            "is_mmproj": bool(is_mmproj),
+        })
+    # 真模型排前面（大→小），mmproj 垫后
+    out.sort(key=lambda x: (x["is_mmproj"], -x["size_bytes"]))
+    return out
+
+
+def _hf_safe_name(repo):
+    return re.sub(r"[^A-Za-z0-9._\-]+", "_", repo or "repo")
+
+
+def hf_download_start(repo, filename, dest_name=None):
+    """建任务 + 起后台线程断点续传。返回任务 dict。"""
+    dest_dir = os.path.join(WEBUI_DIR, "..", "models", "from-hf", _hf_safe_name(repo))
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError:
+        pass
+    dest = os.path.join(dest_dir, dest_name or filename)
+    job_id = uuid.uuid4().hex
+    job = {
+        "id": job_id, "repo": repo, "filename": filename, "dest": dest,
+        "total_bytes": 0, "downloaded_bytes": 0, "status": "starting",
+        "speed_bps": 0, "error": None, "started_at": time.time(),
+        "finished_at": None, "cancel": False,
+    }
+    with HF_JOBS_LOCK:
+        HF_JOBS[job_id] = job
+    threading.Thread(target=_hf_download_worker, args=(job_id,), daemon=True).start()
+    return job
+
+
+def _hf_download_worker(job_id):
+    with HF_JOBS_LOCK:
+        job = HF_JOBS.get(job_id)
+    if not job:
+        return
+    dest = job["dest"]
+    resolve = "https://huggingface.co/%s/resolve/main/%s" % (job["repo"], job["filename"])
+    # 续传起点：已有文件大小（HF LFS 文件落盘不完整时接着下）
+    start = 0
+    if os.path.isfile(dest):
+        try:
+            start = os.path.getsize(dest)
+        except OSError:
+            start = 0
+    job["downloaded_bytes"] = start
+    job["status"] = "downloading"
+    try:
+        # ① 拿 resolve 的重定向位置（手动重发 Range 的准备工作）
+        opener = urllib.request.build_opener(_HFNoRedirect())
+        try:
+            resp = opener.open(urllib.request.Request(resolve, headers=HF_HEADERS), timeout=30)
+            status = resp.status
+            location = resp.headers.get("Location")
+        except urllib.error.HTTPError as e:
+            status = e.code
+            location = e.headers.get("Location")
+        url = location if (status in (301, 302, 303, 307, 308) and location) else resolve
+
+        # ② 带 Range 取数据；已知 total 来自 blobs（权威），兜底用 Content-Range/Content-Length
+        hdr = dict(HF_HEADERS)
+        if start > 0:
+            hdr["Range"] = "bytes=%d-" % start
+        req2 = urllib.request.Request(url, headers=hdr)
+        with urllib.request.urlopen(req2, timeout=90) as r2:
+            cl = r2.headers.get("Content-Length")
+            cr = r2.headers.get("Content-Range")
+            total = job.get("total_bytes") or 0
+            if cr and "/" in cr:
+                try:
+                    total = int(cr.split("/")[-1])
+                except (TypeError, ValueError):
+                    total = 0
+            elif cl:
+                try:
+                    total = start + int(cl)
+                except (TypeError, ValueError):
+                    total = 0
+            job["total_bytes"] = total
+            _t0, _b0 = time.time(), job["downloaded_bytes"]
+            mode = "ab" if start > 0 else "wb"
+            with open(dest, mode) as f:
+                while True:
+                    with HF_JOBS_LOCK:
+                        if job["cancel"]:
+                            job["status"] = "canceled"
+                            break
+                    chunk = r2.read(256 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    job["downloaded_bytes"] += len(chunk)
+                    now = time.time()
+                    if now - _t0 >= 1.0:
+                        job["speed_bps"] = (job["downloaded_bytes"] - _b0) / (now - _t0)
+                        _t0, _b0 = now, job["downloaded_bytes"]
+        # ③ 完成校验：大小对不上 = 失败（HF 偶尔返回错误体积）
+        if job["status"] == "downloading":
+            final = os.path.getsize(dest) if os.path.isfile(dest) else 0
+            if job["total_bytes"] and final != job["total_bytes"]:
+                job["status"] = "error"
+                job["error"] = "size mismatch: got %d, want %d" % (final, job["total_bytes"])
+            else:
+                job["status"] = "completed"
+                job["finished_at"] = time.time()
+                # 让新模型立刻出现在 /api/models（触发一次扫盘）
+                try:
+                    _do_scan()
+                except Exception:
+                    pass
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = "%s: %s" % (type(e).__name__, e)
+    finally:
+        job["finished_at"] = job.get("finished_at") or time.time()
+        job["speed_bps"] = 0
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"   # 开 keep-alive，见上面注释
 
@@ -2658,6 +2854,51 @@ class Handler(BaseHTTPRequestHandler):
                 iid = p.split("/")[-1]
                 ok = stop_instance(iid)
                 self.json(200, {"ok": ok})
+            # ---------- 第 2 批 A：HuggingFace 下载器 ----------
+            elif p == "/api/hf-search":
+                q = parse_qs(u.query).get("q", [""])[0]
+                try:
+                    limit = int(parse_qs(u.query).get("limit", ["20"])[0])
+                except (TypeError, ValueError):
+                    limit = 20
+                self.json(200, {"ok": True, "query": q, "results": hf_search(q, limit)})
+            elif p == "/api/hf-files":
+                repo = parse_qs(u.query).get("repo", [""])[0]
+                if not repo:
+                    self.json(400, {"ok": False, "error": "repo required"})
+                else:
+                    self.json(200, {"ok": True, "repo": repo, "files": hf_files(repo)})
+            elif p == "/api/hf-downloads":
+                with HF_JOBS_LOCK:
+                    jobs = [dict(j) for j in HF_JOBS.values()]
+                self.json(200, {"ok": True, "jobs": jobs})
+            elif p == "/api/hf-download" and data is not None:
+                repo = (data or {}).get("repo")
+                filename = (data or {}).get("filename")
+                dest_name = (data or {}).get("dest_name")
+                if not repo or not filename:
+                    self.json(400, {"ok": False, "error": "repo and filename required"})
+                else:
+                    job = hf_download_start(repo, filename, dest_name)
+                    self.json(200, {"ok": True, "job": dict(job)})
+            elif p.startswith("/api/hf-download/") and p.endswith("/cancel"):
+                jid = p[len("/api/hf-download/"):-len("/cancel")].strip("/")
+                with HF_JOBS_LOCK:
+                    job = HF_JOBS.get(jid)
+                    if job:
+                        job["cancel"] = True
+                        if job["status"] in ("starting", "downloading"):
+                            job["status"] = "canceling"
+                self.json(200, {"ok": job is not None, "id": jid,
+                                "status": job["status"] if job else None})
+            elif p.startswith("/api/hf-download/"):
+                jid = p[len("/api/hf-download/"):].strip("/")
+                with HF_JOBS_LOCK:
+                    job = HF_JOBS.get(jid)
+                if job:
+                    self.json(200, {"ok": True, "job": dict(job)})
+                else:
+                    self.json(404, {"ok": False, "error": "job not found"})
             else:
                 self.json(404, {"error": "not found"})
         except Exception as e:

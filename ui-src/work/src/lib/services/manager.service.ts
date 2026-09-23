@@ -337,6 +337,60 @@ export interface ManagerGpuCleanupResult {
 }
 
 /**
+ * 第 2 批 A：HuggingFace 下载器相关的 manager 返回类型。
+ */
+export interface HfRepoSummary {
+	id: string;
+	downloads: number;
+	likes: number;
+	lastModified?: string | null;
+}
+
+export interface HfFileSummary {
+	filename: string;
+	size_bytes: number;
+	size_gb: number;
+	is_mmproj: boolean;
+}
+
+export interface HfSearchResponse {
+	ok: boolean;
+	query: string;
+	results: HfRepoSummary[];
+}
+
+export interface HfFilesResponse {
+	ok: boolean;
+	repo: string;
+	files: HfFileSummary[];
+}
+
+export interface HfJob {
+	id: string;
+	repo: string;
+	filename: string;
+	dest: string;
+	total_bytes: number;
+	downloaded_bytes: number;
+	status: 'starting' | 'downloading' | 'canceling' | 'canceled' | 'completed' | 'error';
+	speed_bps: number;
+	error: string | null;
+	started_at: number;
+	finished_at: number | null;
+	cancel: boolean;
+}
+
+export interface HfJobResponse {
+	ok: boolean;
+	job: HfJob;
+}
+
+export interface HfDownloadsResponse {
+	ok: boolean;
+	jobs: HfJob[];
+}
+
+/**
  * manager 返回非 2xx 时抛出的错误，携带 HTTP 状态码与请求路径。
  *
  * 为什么需要状态码：manager.py 是**长驻进程**，改了脚本后必须重启才会生效。
@@ -411,6 +465,49 @@ export class ManagerService {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify(opts)
 		});
+	}
+
+	// ---------- 第 2 批 A：HuggingFace 下载器 ----------
+	/** 搜 GGUF 仓库。q 为空时返回热门 GGUF（浏览用）。 */
+	static hfSearch(q: string, limit = 20): Promise<HfSearchResponse> {
+		const qs = new URLSearchParams({ q, limit: String(limit) }).toString();
+
+		return managerFetch<HfSearchResponse>(`/api/hf-search?${qs}`);
+	}
+
+	/** 取某仓库的 .gguf 文件清单 + 大小（一次请求）。 */
+	static hfFiles(repo: string): Promise<HfFilesResponse> {
+		return managerFetch<HfFilesResponse>(`/api/hf-files?repo=${encodeURIComponent(repo)}`);
+	}
+
+	/** 列出全部下载任务（前端刷新页面后恢复进度）。 */
+	static hfDownloads(): Promise<HfDownloadsResponse> {
+		return managerFetch<HfDownloadsResponse>('/api/hf-downloads');
+	}
+
+	/** 开始断点续传下载，返回任务。 */
+	static hfDownloadStart(
+		repo: string,
+		filename: string,
+		destName?: string
+	): Promise<HfJobResponse> {
+		return managerFetch<HfJobResponse>('/api/hf-download', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ repo, filename, dest_name: destName })
+		});
+	}
+
+	/** 查询单个任务进度。 */
+	static hfDownloadStatus(jobId: string): Promise<HfJobResponse> {
+		return managerFetch<HfJobResponse>(`/api/hf-download/${jobId}`);
+	}
+
+	/** 取消下载。 */
+	static hfDownloadCancel(
+		jobId: string
+	): Promise<{ ok: boolean; id: string; status: string | null }> {
+		return managerFetch(`/api/hf-download/${jobId}/cancel`, { method: 'POST' });
 	}
 
 	/**

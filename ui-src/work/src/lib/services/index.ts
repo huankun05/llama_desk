@@ -368,5 +368,13 @@ export type {
 	//   漏了不会让 vite build 失败（构建期不做类型检查），但 svelte-check 会报
 	//   "has no exported member"，把真正的错误淹掉。
 	ManagerGpuCleanupReport,
-	ManagerGpuCleanupResult
+	ManagerGpuCleanupResult,
+	// 第 2 批 A：HuggingFace 下载器
+	HfDownloadsResponse,
+	HfFileSummary,
+	HfFilesResponse,
+	HfJob,
+	HfJobResponse,
+	HfRepoSummary,
+	HfSearchResponse
 } from './manager.service';

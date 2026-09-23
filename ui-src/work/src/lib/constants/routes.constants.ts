@@ -19,6 +19,8 @@ export const ROUTES = {
 	PARAMETERS: '#/parameters',
 	/** Settings — full-page form (same shell as Performance / Parameters). */
 	SETTINGS: '#/settings',
+	/** Model Download — in-app HuggingFace downloader. */
+	DOWNLOAD: '#/download',
 	/** Root — start of the app. */
 	START: '#/'
 } as const;

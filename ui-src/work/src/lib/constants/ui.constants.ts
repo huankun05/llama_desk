@@ -1,4 +1,4 @@
-import { Gauge, Package, Search, Settings, SlidersHorizontal, SquarePen } from '@lucide/svelte';
+import { Download, Gauge, Package, Search, Settings, SlidersHorizontal, SquarePen } from '@lucide/svelte';
 import { SidebarAction, ToolSource } from '$lib/enums';
 import type { DesktopIconStripItem } from '$lib/types';
 import { ROUTES } from './routes.constants';
@@ -87,5 +87,11 @@ export const SIDEBAR_ACTIONS_ITEMS: DesktopIconStripItem[] = [
 		route: ROUTES.SETTINGS,
 		tooltip: 'Settings',
 		activeUrlIncludes: ROUTES.SETTINGS
+	},
+	{
+		icon: Download,
+		route: ROUTES.DOWNLOAD,
+		tooltip: 'Model Download',
+		activeUrlIncludes: ROUTES.DOWNLOAD
 	}
 ];

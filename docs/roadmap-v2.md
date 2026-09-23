@@ -791,8 +791,26 @@ webui/manager_pkg/
 
 > 做完这批：**从"想用某模型"到"跑起来"全程不出应用**。
 
-> **进度（2026-09-23）：8（B-L3）完成；7（A）未开始。**
-> 性能页「加载后预测显存占用」卡片里，原来那根只有百分比的进度条换成**五段堆叠预算条**：
+> **进度（2026-09-23）：第 2 批 7（A 下载器）+ 8（B-L3 预算条）全部完成。**
+>
+> **7（A）应用内下载器**（`overlay.js?v=82`）：
+> - **探针先行**：`tools/model/hf_range_probe.py` 实测 HF `resolve` 302 → CDN（`us.aws.cdn.hf.co`）
+>   后 `Range: bytes=100-` 返回 `206 + Content-Length=fsize-100` —— **urllib 自动跟重定向也会带
+>   Range**，但实现仍用手动重发（捕 `Location` 再发），兼容所有 Python 版本。
+> - **manager.py 零依赖新增 5 个端点**：`/api/hf-search`（HF API 按下载量排序、只留 `gguf` tag，
+>   q 为空 = 热门浏览）、`/api/hf-files`（`?blobs=true` 一次请求拿全部 `.gguf` + `lfs.size`，mmproj
+>   垫后）、`POST /api/hf-download`（后台线程断点续传：已有文件大小即起点 → `Range` 续传 → 256KB
+>   分块写 → 每秒刷新速度 → 完成校验大小 → 触发 `_do_scan()` 让新模型立刻出现）、
+>   `GET /api/hf-download/<id>`（进度）、`…/cancel` + `GET /api/hf-downloads`（任务表）。
+> - **落盘 `models/from-hf/<repo>/`**（已加进 `MODEL_DIRS`），下载完自动出现在本地模型列表。
+> - **新页 `#/download`**：搜索 → 展开仓库看量化清单（大小 + 「可上卡/装不下」徽章 —— 复用
+>   `estimateVram` 结构估算，`arch=null` 走兜底，下载前就能判）→ 下载（进度条/速度/取消）→
+>   刷新页面后从 `/api/hf-downloads` 恢复进行中任务。侧边栏新增「模型下载」入口（lucide `Download`）。
+> - **验收**：后端实测续传（121MB 断点 → 补完 522MB，最终大小 == lfs.size，无叠加损坏）；
+>   `svelte-check` 0/0；新探针 `tools/ui/probe_download_page.mjs` **14/14**（真实 HF 搜索 → 展开 →
+>   下载 → 取消，出图 `diag/shots-20260923-download/`）；回归 63/63（merge 35 + settings 12 + nav 16）。
+>
+> **8（B-L3）显存预算条**：性能页「加载后预测显存占用」卡片里，原来那根只有百分比的进度条换成**五段堆叠预算条**：
 > `权重 / KV / 缓冲与开销 / 桌面与其他程序 / 空闲`，外加一条**「全层上卡线」**（= `modelNeed / 整卡`），
 > 装不下时整条套红环 + 红字「超出容量 N GB」。数字全来自现有口径，没有新后端：
 > - `weights/kv/overhead` ← 前端既有 `estimate`（`estimateVram`，与徽章同源）。
