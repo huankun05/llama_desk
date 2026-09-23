@@ -761,6 +761,13 @@ webui/manager_pkg/
 
 > 做完这批：**等待有解释、卸载有交代、徽章可信**。这是"体验提升"性价比最高的一批。
 
+> **进度（2026-09-23）：4（C）+ 5（D）已完成** —— 只改了 `manager.py` 与前端，没碰外壳。
+> 阶段锚点取 llama-server 自己的 stdout 日志（它没有进度 API），8 个锚点；
+> 起不来时 3 秒内出红条 + 真实原因；倒计时用 `idle_expires_at` 绝对时刻（不是 `ttl-idle` 快照）；
+> 常驻开关 `POST /api/instances/<id>/pin`；事件流 `/api/events?since=` 供卸载/降档各提示一次。
+> 验收：`tools/diag/verify_load_progress.py` 49/49、`tools/ui/probe_load_progress_ui.mjs` 18/18
+> （出图 `diag/shots-20260923-c/`）。**剩下第 6 项 B-L2 后台精确预演缓存未做。**
+
 ### 第 2 批（2~3 天 · 把最后一个手动环节干掉）
 7. **A 应用内下载器**（先写 20 行探针验证 `Range` 在重定向后的行为，再动主体）
 8. **B-L3 显存预算条**

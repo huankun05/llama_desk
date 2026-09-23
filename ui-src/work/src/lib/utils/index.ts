@@ -48,7 +48,7 @@ export { buildProxiedUrl, buildProxiedHeaders } from './cors-proxy';
 export { extractRootDomain, sanitizeExternalUrl, canonicalizeServerUrl } from './url';
 
 // Progress helpers
-export { modelLoadFraction, modelLoadProgressText } from './progress';
+export { modelLoadFraction, modelLoadProgressText, modelLoadStageLabel } from './progress';
 
 // Conversation utilities
 export {

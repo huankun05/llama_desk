@@ -13,6 +13,7 @@
 		Layers,
 		MemoryStick,
 		Pencil,
+		Pin,
 		Power,
 		RefreshCw,
 		Save,
@@ -44,6 +45,7 @@
 		kvCacheStore,
 		lastModelStore,
 		launchPresetsStore,
+		managerLoadStore,
 		maxCtxForVram,
 		normalizeModelKey,
 		serverStore,
@@ -51,6 +53,7 @@
 	} from '$lib/stores';
 	import type { LaunchConfig } from '$lib/stores';
 	import { onMount } from 'svelte';
+	import { toast } from 'svelte-sonner';
 
 	let serverProps = $derived(serverStore.props);
 
@@ -211,6 +214,16 @@
 	let fitInfo = $state<ManagerFitPlan | null>(null);
 	/** 是不是"等就绪等到超时"（要单独给一句文案 + 日志原因） */
 	let switchTimedOut = $state(false);
+	/** 改常驻状态的请求还在飞（防连点） */
+	let pinBusy = $state(false);
+	/**
+	 * 是不是"确定起不来"（比超时严重得多：日志里已经写明了原因）。
+	 *
+	 * 与 `switchTimedOut` 分开，是因为两者给用户的动作完全不同 ——
+	 * 超时 = "再等等 / 调小 ctx 重试"，确定失败 = "参数错了 / 显存不够，看日志"。
+	 * 只报一个 "Timed out" 会把"参数拼错"这类立刻可修的问题说成"慢"。
+	 */
+	let switchFatal = $state(false);
 	/** 手动「预演」的结果（只算不加载） */
 	let preflight = $state<ManagerFitPlan | null>(null);
 	let preflightBusy = $state(false);
@@ -243,20 +256,53 @@
 	 * llama-server 是**加载完才开始 listen**，所以只有轮询才能判定就绪。
 	 * 性能页原先用 `setTimeout(reload, 10000)`：大模型 10 秒根本加载不完，
 	 * 页面会在未就绪时就刷新，用户看到的是半死状态（2026-09-21 修）。
+	 *
+	 * `trackId` 是刚起的实例 id：给了就在同一轮里顺便拉一次加载进度，
+	 * 既画给用户看（"读取权重 45%"），也用来**提前发现失败** —— 日志里一旦出现
+	 * `cudaMalloc failed` / `invalid argument`，就不必再耗满 4 分钟超时。
 	 */
-	async function waitServerReady(port: number, timeoutMs = 240000): Promise<boolean> {
+	async function waitServerReady(
+		port: number,
+		trackId?: string | null,
+		timeoutMs = 240000
+	): Promise<boolean> {
 		const t0 = Date.now();
-		while (Date.now() - t0 < timeoutMs) {
-			try {
-				const r = await fetch(`http://127.0.0.1:${port}/health`, { cache: 'no-store' });
-				if (r.ok) return true;
-			} catch {
-				/* 还没起来，继续等 */
+		const mgr = managerLoadStore;
+		let ok = false;
+
+		mgr.begin(trackId ?? null, '');
+
+		try {
+			while (Date.now() - t0 < timeoutMs) {
+				try {
+					const r = await fetch(`http://127.0.0.1:${port}/health`, { cache: 'no-store' });
+
+					if (r.ok) {
+						ok = true;
+
+						return true;
+					}
+					// 503 = "Loading model"，继续等；其它状态码不是"还没好"而是"不对"
+					if (r.status !== 503) return false;
+				} catch {
+					/* 还没起来，继续等 */
+				}
+
+				switchElapsed = Math.round((Date.now() - t0) / 1000);
+
+				// 顺便推进度；tick 返回 true = 日志里已写明致命错误，立刻收手
+				if (trackId && (await mgr.tick(trackId))) return false;
+
+				await new Promise((r) => setTimeout(r, 1000));
 			}
+
+			return false;
+		} finally {
 			switchElapsed = Math.round((Date.now() - t0) / 1000);
-			await new Promise((r) => setTimeout(r, 1000));
+			// 无论从哪条路退出都要收尾，否则全局 store 会一直停在"正在加载"，
+			// 对话气泡那边也会一直显示上一个模型的名字。
+			mgr.end(!ok);
 		}
-		return false;
 	}
 
 	/**
@@ -415,6 +461,57 @@
 	 * 用它显示空闲倒计时 —— manager 的看门狗会在空闲超过 TTL 后把它卸掉。
 	 */
 	const runningInstance = $derived(instances.find((i) => i.status === 'running') ?? null);
+
+	/** 每秒心跳：只服务于倒计时的本地走秒（见下） */
+	let nowTick = $state(Date.now());
+
+	/**
+	 * 已加载模型还有多少秒被看门狗卸掉。null = 常驻 / 还没被判定空闲（那就别显示倒计时）。
+	 *
+	 * ⚠️ 用 `idle_expires_at`（绝对 epoch 时刻）重算，而不是 `ttl_seconds - idle_seconds`：
+	 * 后者是服务端**上次轮询那一刻**的快照，界面上的秒数会一直冻着不动 ——
+	 * 用户盯着"4:12 后卸载"看半分钟发现还是 4:12，会以为界面卡死了。
+	 * 之前就是这么写的，所以这里顺手改成真·倒计时。
+	 */
+	const idleLeftSecs = $derived.by(() => {
+		const inst = runningInstance;
+
+		if (!inst?.idle_expires_at) return null;
+
+		return Math.max(0, (inst.idle_expires_at * 1000 - nowTick) / 1000);
+	});
+
+	// 只有"确实有倒计时要显示"时才起心跳：没有已加载实例时不做无谓的每秒重渲染
+	$effect(() => {
+		if (!runningInstance?.idle_expires_at) return;
+
+		const id = window.setInterval(() => (nowTick = Date.now()), 1000);
+
+		return () => window.clearInterval(id);
+	});
+
+	/**
+	 * 保持常驻 / 取消常驻。看门狗会跳过 pinned 的实例（对齐 Ollama 的 `keep_alive: -1`）。
+	 *
+	 * 失败**必须说出来**：跑的是没有这个端点的旧 manager（404）时，静默失败会让用户
+	 * 以为"已经常驻了"，回头模型照样被卸 —— 那比没有这个按钮更糟。
+	 */
+	async function togglePin(inst: ManagerInstance | null) {
+		if (!inst?.id) return;
+
+		pinBusy = true;
+
+		try {
+			await ManagerService.pinInstance(inst.id, !inst.pinned);
+			await loadMgr();
+		} catch (e: unknown) {
+			toast.error('Could not change the keep-loaded setting', {
+				description: e instanceof Error ? e.message : String(e)
+			});
+		} finally {
+			pinBusy = false;
+		}
+	}
 
 	/**
 	 * 「模型切换」标题右边那条胶囊，只画**真正在跑的**实例。
@@ -1211,6 +1308,7 @@
 		switchHint = '';
 		fitInfo = null;
 		switchTimedOut = false;
+		switchFatal = false;
 		managerStale = false;
 
 		const cfg = configFor(m);
@@ -1264,7 +1362,9 @@
 			// 就绪判定统一成轮询 /health（对齐聊天框的模型选择器）。
 			// 以前这里是固定等 10 秒就 reload —— 大模型 10 秒没加载完，
 			// 页面会在未就绪时刷新，看起来像"换模型失败了"。
-			const ready = await waitServerReady(targetPort);
+			// 传入实例 id：等待期间顺便拉加载进度，用户能看到"读取权重 45%"，
+			// 而不是一个转圈的 "Loading…"。
+			const ready = await waitServerReady(targetPort, inst.id);
 
 			if (ready) {
 				location.reload();
@@ -1272,9 +1372,12 @@
 				return;
 			}
 
-			// 超时：把日志里的真实原因翻出来，别再只丢一个 "timeout"
+			// 起不来：把日志里的真实原因翻出来，别再只丢一个 "timeout"。
+			// 关键区分：日志里已写明原因（cudaMalloc failed / 参数拼错）时是**确定失败**，
+			// 而不是"慢" —— 两者该做的动作完全不同，都报 "Timed out" 会把人引偏。
 			switchPhase = 'error';
-			switchTimedOut = true;
+			switchFatal = !!managerLoadStore.failure?.error;
+			switchTimedOut = !switchFatal;
 			switchDetail = `${switchElapsed}s`;
 			await explainFailure(inst.id);
 		} catch (e: unknown) {
@@ -1917,10 +2020,47 @@
 					<span>Loading…</span> <span class="font-mono">{switchDetail}</span>
 					<span>· waiting for the server ·</span>
 					<span class="font-mono">{mmss(switchElapsed)}</span>
+					<!--
+						阶段进度。llama-server 没有进度 API，加载期间 /health 只有 503/200 两档；
+						这里是 manager 从它的 stdout 日志里解析出来的阶段
+						（见 manager.py 的 LOAD_STAGE_MARKERS）：
+						拉起进程 → 读取权重 → 线程池 → 超参数 → 视觉投影层 → KV 缓存 → 就绪。
+					-->
+					{#if managerLoadStore.active}
+						<div class="mt-2.5 h-1 w-full overflow-hidden rounded-full bg-border">
+							<div
+								class="h-full rounded-full bg-primary transition-[width] duration-500"
+								style:width="{Math.round((managerLoadStore.progress?.value ?? 0) * 100)}%"
+							></div>
+						</div>
+						<div class="mt-1.5 flex flex-wrap items-baseline gap-x-2">
+							<!-- ⚠️ 阶段名必须是独立文本节点：overlay.js 按整节点精确等值匹配，
+							     和百分比拼成一个串就永远翻译不出来。 -->
+							<span class="text-foreground">{managerLoadStore.label}</span>
+							<span class="font-mono opacity-70">{managerLoadStore.detail}</span>
+						</div>
+						<!-- 自适应降档要在**等待期间**就说明：以前它完全静默 ——
+						     用户设了 128K，实际下发 32K，界面上一个字都不提。 -->
+						{#if managerLoadStore.autoTunedCtx}
+							<div class="mt-1 text-amber-600 dark:text-amber-500">
+								<span>Context was lowered to fit your VRAM:</span>
+								<span class="font-mono"
+									>{managerLoadStore.progress?.requested_ctx} → {managerLoadStore.progress
+										?.n_ctx_slot}</span
+								>
+							</div>
+						{/if}
+					{/if}
 				{:else if switchPhase === 'started'}
 					<span>Started.</span> <span class="font-mono">{switchDetail}</span>
-				{:else if switchPhase === 'error' && switchTimedOut}
-					<span>Timed out waiting for the server ·</span>
+				{:else if switchPhase === 'error' && (switchTimedOut || switchFatal)}
+					<!-- 区分"慢"和"错"：前者该调小 ctx 重试，后者该去看参数/显存。
+					     只报一个 "Timed out" 会把"参数拼错"这种立刻可修的问题说成"慢"。 -->
+					{#if switchFatal}
+						<span>Model failed to start ·</span>
+					{:else}
+						<span>Timed out waiting for the server ·</span>
+					{/if}
 					<span class="font-mono text-red-500">{switchDetail}</span>
 					{#if switchLog}
 						<pre
@@ -2092,28 +2232,48 @@
 
 									{#if loaded}
 										<!-- 空闲倒计时：manager 的看门狗会在 TTL 到期后把它卸掉，
-										     不显示的话用户会觉得模型"莫名其妙消失" -->
+										     不显示的话用户会觉得模型"莫名其妙消失"（Ollama 的 UNTIL 列
+										     就是这个作用）。秒数由 idle_expires_at 每秒重算，真的在走。 -->
 										<span class="shrink-0 text-right text-xs text-muted-foreground">
-											{#if runningInstance && runningInstance.ttl_seconds != null && runningInstance.ttl_seconds > 0}
-												{#if runningInstance.idle_seconds != null}
-													<span>Idle</span>
-													<span class="font-mono">{mmss(runningInstance.idle_seconds)}</span>
-													<span>· unload in</span>
-													<span class="font-mono"
-														>{mmss(
-															Math.max(
-																0,
-																runningInstance.ttl_seconds - runningInstance.idle_seconds
-															)
-														)}</span
-													>
-												{:else}
-													<span>In use</span>
-												{/if}
+											{#if runningInstance?.pinned || (runningInstance?.ttl_seconds != null && runningInstance.ttl_seconds <= 0)}
+												<!-- 文案用 'Kept loaded' 而不是 'Pinned'：overlay.js 的词条是
+												     "整节点等值"匹配，而 'Pinned' 这个键已被上游侧边栏
+												     「置顶对话」占用（→ 已置顶），同一个对象里重复的键
+												     后者覆盖前者，会把侧边栏的译文静默改错。 -->
+												<span>Kept loaded</span>
+											{:else if idleLeftSecs != null}
+												<span>Idle</span>
+												<span class="font-mono">{mmss(runningInstance?.idle_seconds ?? 0)}</span>
+												<span>· unload in</span>
+												<span class="font-mono">{mmss(idleLeftSecs)}</span>
+											{:else if runningInstance?.idle_seconds != null}
+												<span>Idle</span>
+												<span class="font-mono">{mmss(runningInstance.idle_seconds)}</span>
 											{:else}
-												<span>Loaded</span>
+												<span>In use</span>
 											{/if}
 										</span>
+
+										<!-- 常驻开关：8 GB 卡上「常用的那个模型被卸掉」比「多占 3 GB」更烦人，
+										     所以必须有 per-model 的"别卸我"（对标 Ollama 的 keep_alive: -1）。 -->
+										{#if runningInstance?.id}
+											<button
+												class="shrink-0 rounded-md border p-1.5 transition-colors {runningInstance.pinned
+													? 'border-primary/50 text-primary'
+													: 'border-border text-muted-foreground hover:border-primary/50 hover:text-primary'}"
+												disabled={pinBusy}
+												onclick={(e: MouseEvent) => {
+													e.stopPropagation();
+													togglePin(runningInstance);
+												}}
+												title={runningInstance.pinned
+													? 'Stop keeping this model loaded'
+													: 'Keep this model loaded (never unload when idle)'}
+												type="button"
+											>
+												<Pin class="h-3.5 w-3.5 {runningInstance.pinned ? 'fill-current' : ''}" />
+											</button>
+										{/if}
 									{:else}
 										<Button
 											class="shrink-0"

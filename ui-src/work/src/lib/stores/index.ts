@@ -44,6 +44,10 @@ export { modelsStore } from './models/index.svelte';
 export { lastModelStore, idleTtlSeconds } from './last-model.svelte';
 export type { LastModelRef } from './last-model.svelte';
 
+// MANAGER LOAD PROGRESS (加载阶段进度 / 卸载事件；对话气泡与性能页共用)
+export { managerLoadStore } from './manager-load.svelte';
+export type { ManagerLoadFailure } from './manager-load.svelte';
+
 // LAUNCH PRESETS (named llama-server launch configurations / 启动方案)
 export {
 	launchPresetsStore,

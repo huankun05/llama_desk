@@ -20,6 +20,12 @@ import type { ModelArch } from '$lib/stores/launch-presets.svelte';
 // 方向是 service → store；last-model store 只以 `import type` 反过来引用 services，
 // 编译后那条 import 会被擦除，所以不存在运行时循环。
 import { lastModelStore } from '$lib/stores/last-model.svelte';
+// 加载进度（C）/ 卸载可见性（D）的跨页面状态。
+// ⚠️ 这里是**双向**引用：manager-load.svelte.ts 也要 import 本文件的 ManagerService。
+//    能成立的原因是两边都只在**方法体里**用对方的导出，模块顶层不求值 ——
+//    ESM 的循环依赖在这种情况下只是"拿到同一个模块对象"，不会有 TDZ 问题。
+//    （项目里 models/status.svelte.ts 也是同理，注释里叫 "avoid circular deps"。）
+import { managerLoadStore } from '$lib/stores/manager-load.svelte';
 
 /** 磁盘上的一个可用 GGUF 模型（由 manager 解析头部元数据得到） */
 export interface ManagerModel {
@@ -140,6 +146,17 @@ export interface ManagerInstance {
 	ttl_seconds?: number | null;
 	/** 已空闲秒数；null 表示正在干活或读不到状态 */
 	idle_seconds?: number | null;
+	/**
+	 * 还有多久被空闲看门狗卸掉（epoch 秒）。
+	 * **null 有三种含义**，必须配合 `pinned` / `ttl_seconds` 区分：
+	 * ① pinned ② ttl_seconds<=0（都是"常驻"）③ 还没被判定为空闲（倒计时不可知）。
+	 * 拿到 null 就别显示倒计时，而不是显示"0 秒后卸载"。
+	 */
+	idle_expires_at?: number | null;
+	/** 用户要求常驻，看门狗跳过它（对齐 Ollama 的 keep_alive: -1） */
+	pinned?: boolean;
+	/** 启动时用户**请求**的参数；与自适应降档的实际结果对比用 */
+	requested?: Record<string, unknown>;
 	/** 被空闲看门狗卸掉时是 'idle' */
 	unloaded_reason?: string | null;
 	/** 本次启动实际挂上的视觉投影层路径；没挂（纯文本）时为 null/undefined */
@@ -151,6 +168,60 @@ export interface ManagerInstance {
 	 * 唤醒休眠模型时用它还原 -np / -fa 这类没单独存字段的参数。
 	 */
 	args?: string[];
+}
+
+/** 一个加载阶段（进度条上的一格） */
+export interface ManagerLoadStage {
+	key: string;
+	/** 英文文案。汉化交给 webui/overlay.js —— 本项目唯一的本地化源 */
+	label: string;
+	/** 该阶段在进度条上的位置 0~1 */
+	value: number;
+}
+
+/**
+ * `GET /api/instances/{id}/progress` —— 加载进度快照（新 manager 才有）。
+ *
+ * 数据源是 **llama-server 的 stdout 日志**：它没有进度 API，加载期间 `/health`
+ * 只有 503/200 两档。而日志每行自带 `H.MM.SSS.mmm` 时间戳，阶段就是现成的
+ * （见 manager.py 的 `LOAD_STAGE_MARKERS`）。
+ */
+export interface ManagerLoadProgress {
+	phase: string;
+	label: string;
+	/** 整体进度 0~1 */
+	value: number;
+	index: number;
+	stages: ManagerLoadStage[];
+	/** 实际生效的上下文长度（只在 kv_cache 阶段之后才有值） */
+	n_ctx_slot?: number | null;
+	/** 启动时**请求**的 ctx。与 n_ctx_slot 不同即说明被自动降过档 */
+	requested_ctx?: number | null;
+	elapsed_ms: number;
+	/** 按文件大小估的预期耗时（热缓存口径，只作参考） */
+	expected_ms: number;
+	running: boolean;
+	healthy: boolean;
+	/** 进程活着 + /health 200 + 走到最后一个锚点，三条同时成立才算真的好了 */
+	done: boolean;
+	/** 日志里的失败行（没有则 null）。有它才能在 3 秒内出红条而不是干等超时 */
+	error?: string | null;
+	log_tail?: string[];
+}
+
+/** `GET /api/events` 里的一条生命周期事件 */
+export interface ManagerLifecycleEvent {
+	/** 单调递增游标。同秒内可能有多条，所以**不能**用时间戳当游标 */
+	seq: number;
+	at: number;
+	kind: 'unloaded' | 'auto_tuned' | string;
+	id?: string;
+	model?: string;
+	port?: number;
+	/** 卸载原因：idle / manual / replaced / cleanup */
+	reason?: string;
+	requested?: Record<string, unknown>;
+	applied?: Record<string, unknown>;
 }
 
 /** 实时系统指标（供圆环弹卡展示「本模型占用」） */
@@ -355,6 +426,32 @@ export class ManagerService {
 	}
 
 	/**
+	 * 保持常驻 / 取消常驻。
+	 *
+	 * 对齐 Ollama 的 `keep_alive: -1`：看门狗会跳过 pinned 的实例。存在意义很直接 ——
+	 * 8 GB 卡上「回到电脑前发现常用的那个模型被卸了」比「多占 3 GB」更烦人。
+	 */
+	static pinInstance(
+		id: string,
+		pinned: boolean
+	): Promise<{ ok: boolean; pinned: boolean | null }> {
+		return managerFetch<{ ok: boolean; pinned: boolean | null }>(`/api/instances/${id}/pin`, {
+			body: JSON.stringify({ pinned }),
+			headers: { 'Content-Type': 'application/json' },
+			method: 'POST'
+		});
+	}
+
+	/** 改自动卸载时长（秒）。传 0 或负数 = 永不卸载。 */
+	static setInstanceTtl(id: string, ttlSeconds: number): Promise<{ ok: boolean }> {
+		return managerFetch<{ ok: boolean }>(`/api/instances/${id}/ttl`, {
+			body: JSON.stringify({ ttl_seconds: ttlSeconds }),
+			headers: { 'Content-Type': 'application/json' },
+			method: 'POST'
+		});
+	}
+
+	/**
 	 * 直接起一个实例（**不会**先停旧的、也不腾端口）。
 	 *
 	 * 存在的意义：`/api/switch` 是后加的端点，如果 manager.py 更新了但进程还是
@@ -459,10 +556,13 @@ export class ManagerService {
 
 		const reason: 'woken' | 'lazy' = inst?.model_path ? 'woken' : 'lazy';
 
+		// 记录 /api/switch 建出来的实例：下面要靠它的 id 去拉加载进度
+		let launched: ManagerInstance | null = null;
+
 		try {
 			// 注意：/api/switch 的语义是「起完就返回」，它**不等**模型 ready，
 			// 所以下面必须自己等 /health —— 否则原请求会在模型还在加载时打过去。
-			await managerFetch<ManagerInstance>('/api/switch', {
+			launched = await managerFetch<ManagerInstance>('/api/switch', {
 				body: JSON.stringify(payload),
 				headers: { 'Content-Type': 'application/json' },
 				method: 'POST',
@@ -472,7 +572,14 @@ export class ManagerService {
 			return { loaded: false, model: payload.name, reason };
 		}
 
-		const ok = await ManagerService.waitHealthy(opts);
+		// 从这里起界面就能显示「读取权重 45%」了。**必须在 /api/switch 之后**：
+		// 在那之前实例还没被创建出来，拿不到 id，也就没有进度可拉。
+		managerLoadStore.begin(launched?.id ?? null, payload.name);
+
+		const ok = await ManagerService.waitHealthy(opts, launched?.id);
+
+		// 失败时把日志里的真实原因留在 store 里给界面展示（见 ManagerLoadFailure）
+		managerLoadStore.end(!ok);
 
 		if (ok) {
 			// 记下来：下次应用重启时，界面靠它显示「上次用的模型（未加载）」
@@ -560,9 +667,19 @@ export class ManagerService {
 		};
 	}
 
-	/** 轮询本页 origin 的 `/health`，等模型真的能接请求（`/api/switch` 不等 ready）。 */
+	/**
+	 * 轮询本页 origin 的 `/health`，等模型真的能接请求（`/api/switch` 不等 ready）。
+	 *
+	 * `trackId` 是刚起的那个实例 id：给了就在同一轮里顺便拉一次加载进度写进
+	 * `managerLoadStore`，**不额外起定时器** —— 这里的等待本身就是这件事的驱动源。
+	 *
+	 * 一旦日志里出现致命错误（`cudaMalloc failed` / `invalid argument` …）就不再
+	 * 等满 120 秒，立刻返回 false —— 界面因此能在几秒内给出**真实原因**，
+	 * 而不是让用户对着转圈等到超时再看到一句含糊的连接失败。
+	 */
 	private static async waitHealthy(
-		opts: { signal?: AbortSignal; timeoutMs?: number } = {}
+		opts: { signal?: AbortSignal; timeoutMs?: number } = {},
+		trackId?: string | null
 	): Promise<boolean> {
 		const deadline = Date.now() + (opts.timeoutMs ?? WAKE_READY_TIMEOUT_MS);
 		// 相对本页解析（并丢掉 #hash），确保探的就是聊天请求要去的那个端口
@@ -575,9 +692,15 @@ export class ManagerService {
 				const res = await fetch(url, { cache: 'no-store' });
 
 				if (res.ok) return true;
+				// 503 = "Loading model"，继续等；其它状态码不是"还没好"而是"不对"，
+				// 没必要耗满 120 秒。
+				if (res.status !== 503) return false;
 			} catch {
 				// 连接被拒 = 还没起来，继续等
 			}
+
+			// 顺便推进度，并捕捉"已经确定失败"的信号
+			if (trackId && (await managerLoadStore.tick(trackId))) return false;
 
 			await new Promise((r) => setTimeout(r, 500));
 		}
@@ -647,5 +770,27 @@ export class ManagerService {
 		if (!res.ok) throw new ManagerError(res.status, `/api/instances/${id}/log`);
 
 		return await res.text();
+	}
+
+	/**
+	 * 某实例的加载进度（新 manager 才有）。
+	 *
+	 * 只在「等模型 ready」的过程中调用：manager 每次都要探一次 `/health` 并读日志尾部，
+	 * 不属于该被高频轮询的常规接口。
+	 */
+	static instanceProgress(id: string, init?: RequestInit): Promise<ManagerLoadProgress> {
+		return managerFetch<ManagerLoadProgress>(`/api/instances/${id}/progress`, init);
+	}
+
+	/**
+	 * 生命周期事件增量（新 manager 才有）。
+	 *
+	 * ⚠️ 首次调用请传 `since=0`，然后**只记下 max seq、不要弹提示** —— 否则应用一打开
+	 * 就会把留存的历史事件（最多 100 条）一次性弹成满屏 toast。
+	 */
+	static fetchEvents(since = 0): Promise<ManagerLifecycleEvent[]> {
+		return managerFetch<{ events: ManagerLifecycleEvent[] }>(`/api/events?since=${since}`).then(
+			(r) => r.events ?? []
+		);
 	}
 }

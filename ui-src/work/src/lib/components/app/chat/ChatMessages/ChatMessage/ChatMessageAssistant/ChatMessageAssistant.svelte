@@ -11,9 +11,8 @@
 	import { getChatMessageEditContext } from '$lib/contexts';
 	import { MessageRole } from '$lib/enums';
 	import { useProcessingState } from '$lib/hooks/use-processing-state.svelte';
-	import { chatStore, modelsStore, serverStore, settingsStore } from '$lib/stores';
-	import { modelLoadProgressText } from '$lib/utils';
-	import { hasAgenticContent } from '$lib/utils';
+	import { chatStore, managerLoadStore, modelsStore, serverStore, settingsStore } from '$lib/stores';
+	import { hasAgenticContent, modelLoadFraction, modelLoadStageLabel } from '$lib/utils';
 
 	interface Props {
 		class?: string;
@@ -58,10 +57,43 @@
 	let loadTargetModel = $derived(
 		message.model ?? chatStore.getResumeModel(message.convId) ?? modelsStore.selectedModelName
 	);
-	let modelLoadProgress = $derived(
+	/**
+	 * 模型加载进度有**两条互斥的路**，必须按顺序问：
+	 *  ① manager 路径（本项目主力）：首次发消息 → `/api/switch` 另起一个单模型实例。
+	 *     它不在 router 模式下，拿不到官方那套 `/models/sse` 进度，数据来自
+	 *     manager 解析 llama-server 的 stdout 日志（见 manager-load.svelte.ts）。
+	 *  ② 官方 router 模式（哨兵进程自己加载模型）。
+	 */
+	let routerProgress = $derived(
 		isRouter && loadTargetModel ? modelsStore.status.getLoadProgress(loadTargetModel) : null
 	);
-	let modelLoadingText = $derived(modelLoadProgressText(modelLoadProgress));
+	let modelLoadingLabel = $derived(
+		managerLoadStore.active
+			? managerLoadStore.label
+			: routerProgress
+				? modelLoadStageLabel(routerProgress.current)
+				: null
+	);
+	let modelLoadingDetail = $derived(
+		managerLoadStore.active
+			? managerLoadStore.detail
+			: routerProgress
+				? `${Math.round(modelLoadFraction(routerProgress) * 100)}%`
+				: null
+	);
+	// 起不来时把真实原因留住（成功则恒为 null）
+	let loadErrorTitle = $derived(managerLoadStore.failure ? 'Model failed to start' : null);
+	let loadErrorDetail = $derived.by(() => {
+		const f = managerLoadStore.failure;
+
+		if (!f) return null;
+
+		// 错误行 + 它前后的日志（去重）。只给一行常常看不出上下文 ——
+		// 例如 "invalid argument: -fit-target" 得看到上一行的参数解析才有意义。
+		const lines = [f.error, ...f.logTail.filter((l) => l && l !== f.error)];
+
+		return lines.slice(0, 4).join('\n');
+	});
 
 	let showProcessingInfoTop = $derived(
 		message?.role === MessageRole.ASSISTANT &&
@@ -138,7 +170,14 @@
 	role="group"
 >
 	{#if showProcessingInfoTop}
-		<ChatMessageAssistantProcessingInfo {modelLoadingText} position="top" {processingState} />
+		<ChatMessageAssistantProcessingInfo
+			{modelLoadingLabel}
+			{modelLoadingDetail}
+			{loadErrorTitle}
+			{loadErrorDetail}
+			position="top"
+			{processingState}
+		/>
 	{/if}
 
 	{#if editCtx.isEditing}
@@ -157,7 +196,14 @@
 	{/if}
 
 	{#if showProcessingInfoBottom}
-		<ChatMessageAssistantProcessingInfo {modelLoadingText} position="bottom" {processingState} />
+		<ChatMessageAssistantProcessingInfo
+			{modelLoadingLabel}
+			{modelLoadingDetail}
+			{loadErrorTitle}
+			{loadErrorDetail}
+			position="bottom"
+			{processingState}
+		/>
 	{/if}
 
 	{#if displayedModel}

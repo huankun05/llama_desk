@@ -72,3 +72,49 @@
 - 验收两层：① `/props` → `vision:true` + 日志 `loaded multimodal model`；
   ② `tools/model/vision_check.mjs`（合成白底红圆 PNG → base64），答 `Red circle` 即通过。
   ⚠️ `max_tokens` ≥200，否则思考链吃光额度、`content` 空。
+
+## 5. ⭐ 加载进度：从 stdout 日志反推阶段（C，2026-09-23 落地）
+
+- ⚠️ **llama-server 没有进度 API**：加载期间 `GET /health` 只有两档 ——
+  503 `{"error":{"code":503,"message":"Loading model"}}` → 200。**中间过程它一个字都不说**。
+  所以进度只能从它自己的 **stdout 日志**（`webui/inst_<port>.log`）里解析：
+  每行自带 `H.MM.SSS.mmm` 时间戳，锚点顺序是真实的。
+- **8 个锚点（`LOAD_STAGE_MARKERS`，顺序即优先级）**：
+  `common_params_print_info` → `load_model: loading model` → `llama threadpool init`
+  → `load_hparams:` → `loaded multimodal model` → `load_model: initializing`
+  → `llama_server: model loaded` → `listening on http`。
+  ⚠️ **`weights` 在 `threadpool` 之前**（反直觉，别按"先建线程池再读权重"想当然排）。
+- **`n_ctx_slot` 是唯一能证明「降档真的发生了」的证据**：它只在
+  `load_model: initializing, n_slots = …, n_ctx_slot = …` 这行里出现。
+  请求 128K、实际 32K → 界面明示 `已按显存自动下调上下文长度：131072 → 32768`。
+  以前这是**完全静默**的（用户设了 128K，实际下发 32K，界面一个字不说）。
+- 只读日志**尾部 64 KB**（`LOAD_LOG_TAIL_BYTES`）：全量读会在大日志上拖慢轮询。
+  ⚠️ 解码必须走 `_decode_bytes`（utf-8 → gbk → replace），**不能 `text=True`**。
+- `done` 要**同时**满足三件事：进程活着 + `/health` 200 + 已到最后锚点。
+  只判前两个会在"换模型时端口上残留的旧进程"上误报成功。
+- 失败早停：`LOAD_ERROR_RE` 命中 `error:/failed to/cudamalloc/out of memory/…` →
+  `/progress` 返回 `error`，前端**立刻**停轮询并出红条 + 末几行日志。
+  **实测红条约 3 秒出**，而不是干等 120 秒超时（"参数拼错"被说成"慢"，最误导人）。
+- 端点与截图验收：`GET /api/instances/<id>/progress`；
+  `tools/ui/probe_load_progress_ui.mjs`（4 场景 18 项，`diag/shots-20260923-c/`）；
+  后端单测 `tools/diag/verify_load_progress.py`（49 项，含中文路径 GBK/UTF-8 双编码回归）。
+
+## 6. ⭐ 空闲卸载的可见性与控制（D，2026-09-23 落地）
+
+- **`idle_expires_at`（绝对 epoch 时刻）而不是 `ttl - idle`**：
+  后者是服务端**上次轮询那一刻**的快照，界面上秒数会一直冻着 ——
+  用户盯着「4:12 后卸载」看半分钟发现还是 4:12，会以为界面卡死。
+  `null` 的三种含义：**常驻 / ttl≤0（永不）/ 还没判定空闲** → 一律**不显示倒计时**，
+  而不是显示「0 秒后卸载」。
+- 常驻开关 = per-model 的「别卸我」（对标 Ollama `keep_alive: -1`）：
+  `POST /api/instances/<id>/pin {pinned}`；`_idle_tick` 里 `pinned` 直接 `continue`。
+  8GB 卡上「常用的那个模型被悄悄卸掉」比「多占 3 GB」更烦人。
+- `POST /api/instances/<id>/ttl {ttl_seconds}` ⚠️ **必须重置 `idle_since = None`**：
+  不重置的话，把 TTL 从 60s 改大反而会在下一个 tick 立刻卸载。
+- **事件流 `/api/events?since=<seq>`**（环形缓冲，最近 100 条，单调 `seq`）：
+  卸载是**后台看门狗**的行为，跟用户此刻在哪个页面无关 ——
+  正在对话页打字、模型却被卸掉腾显存，恰恰最需要提示一次。
+  ⚠️ 必须用事件流而不是前端自己 diff `/api/instances`：轮询只能看出"某一刻它没了"，
+  分不清是刚卸的还是早就卸的，也拿不到原因（idle / manual / replaced）。
+  ⚠️ 前端**首轮只对齐游标、不弹提示**（seq 从 0 拉就是全量，可能一次弹 100 个 toast）。
+- 事件另有用处：`auto_tuned` 事件把"参数被自动改小了"也提示一次（见 §5 的静默问题）。

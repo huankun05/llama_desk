@@ -1140,6 +1140,41 @@
     '· Windows may take a moment to return the VRAM.': '· Windows 可能还需要一点时间才归还显存。',
     'Scanning for llama-server processes...': '正在扫描 llama-server 进程…',
     'Stop this process and release its VRAM': '结束这个进程并释放它占的显存',
+
+    // ---------- 模型加载阶段（C）----------
+    // 下面这些 label 由 manager 的 /api/instances/<id>/progress 返回
+    // （见 manager.py 的 LOAD_STAGE_MARKERS）。界面把它们**单独渲染成一个文本节点**，
+    // 所以整节点等值匹配能命中 —— 上游原先把阶段名和百分比拼成一个串（
+    // "Loading weights 45%"），那种形态这里永远匹配不到，等于一直显示英文。
+    'Starting process': '拉起进程',
+    'Reading weights': '读取权重',
+    'Initializing threads': '初始化线程池',
+    'Reading hyperparameters': '读取超参数',
+    'Initializing KV cache': '初始化 KV 缓存',
+    'Almost ready': '即将就绪',
+    'Ready': '就绪',
+    // ⚠️ 别再往这里加 'Loading model' / 'Loading weights' / 'Loading draft'
+    //    / 'Loading projector' —— 上面 300 行左右（上游文本）已经有同名的词条，
+    //    同一个对象字面量里重复的键**后者覆盖前者**，会静默改掉上游那几处的译文。
+    //    实测踩过：新加的 'Pinned': '常驻中' 把侧边栏「置顶对话」的
+    //    'Pinned': '已置顶' 顶掉了。新增词条前先 grep 一遍键名。
+    // 官方 router 模式那套阶段名（MODEL_LOAD_STAGE_LABELS）复用上游既有译文即可。
+    'Model failed to start ·': '模型启动失败 ·',
+    'Model did not become ready in time': '模型未在预期时间内就绪',
+
+    // ---------- 空闲卸载的可见性与控制（D）----------
+    // 用 'Kept loaded' 而不是 'Pinned'：后者是上游侧边栏「置顶对话」的键，撞了。
+    'Kept loaded': '常驻中',
+    // 等待加载时那句「实际下发的 ctx 被自动改小了」。
+    // ⚠️ 截图验收时抓到的漏网之鱼：中文界面里孤零零留着一行英文
+    //    （阶段名、百分比、降档数字都对了，只有这句没进词表）。
+    //    新增任何英文文案后，**必须**回这张表里补一条，或去 header 里 grep 确认已存在。
+    'Context was lowered to fit your VRAM:': '已按显存自动下调上下文长度：',
+    'Keep this model loaded (never unload when idle)': '保持常驻（空闲时不自动卸载）',
+    'Stop keeping this model loaded': '取消常驻',
+    'Could not change the keep-loaded setting': '无法修改常驻设置',
+    'Model unloaded to save VRAM - send a message to load it again': '已为节省显存卸载模型 —— 发一条消息即可重新加载',
+    'Launch parameters were lowered to fit your VRAM': '启动参数已按显存自动下调',
     };
   // ---------- 带动态内容的文本：正则规则表 ----------
   // 上面 DICT 是「整个文本节点等值」匹配，只覆盖得了完全静态的文案。模板里一旦有

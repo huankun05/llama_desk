@@ -19,6 +19,7 @@
 	import { useKeyboardShortcuts } from '$lib/hooks/use-keyboard-shortcuts.svelte';
 	import { usePwa } from '$lib/hooks/use-pwa.svelte';
 	import { RouterService } from '$lib/services/router.service';
+	import { ManagerService } from '$lib/services';
 	import {
 		chatStore,
 		conversationsStore,
@@ -34,7 +35,7 @@
 	import { ModeWatcher } from 'mode-watcher';
 	import { untrack } from 'svelte';
 	import { onMount } from 'svelte';
-	import { Toaster } from 'svelte-sonner';
+	import { Toaster, toast } from 'svelte-sonner';
 	import { pwaAssetsHead } from 'virtual:pwa-assets/head';
 
 	let { children } = $props();
@@ -185,7 +186,69 @@
 		// snapshot of every backend running stream on first load, populates the sidebar spinners
 		// so the user sees each conv that has a live inference, even ones not opened yet
 		void chatStore.syncRemoteRunningStreams();
+
+		return watchManagerEvents();
 	});
+
+	/**
+	 * 轮询 manager 的生命周期事件，把「模型被卸了」「参数被自动降档了」各提示**一次**。
+	 *
+	 * 为什么放在 layout 而不是性能页：卸载是后台看门狗的行为，跟用户此刻在哪个页面无关 ——
+	 * 正在对话页打字、模型却被悄悄卸掉腾显存，恰恰是最需要提示一次的场景。
+	 *
+	 * 数据源必须是 manager 的事件流而不是自己 diff `/api/instances`：
+	 * 轮询只能看出"某一刻它没了"，分不清是刚刚卸的还是早就卸了，也拿不到原因
+	 * （idle / manual / replaced）。原因决定了这句提示该怎么写。
+	 */
+	function watchManagerEvents(): () => void {
+		let seq = 0;
+		let primed = false;
+
+		const poll = async () => {
+			let events;
+
+			try {
+				events = await ManagerService.fetchEvents(seq);
+			} catch {
+				// manager 没起、或跑的是没有这个端点的旧版本：静默跳过，下次再试。
+				// 这条轮询是旁路，绝不能因为它失败而影响界面。
+				return;
+			}
+
+			if (events.length === 0) return;
+
+			// ⚠️ 首轮只对齐游标、不弹提示：manager 里可能存着最多 100 条历史事件
+			//    （seq 从 0 拉就是全量），全弹出来会是满屏 toast。
+			if (primed) {
+				for (const ev of events) {
+					if (ev.kind === 'unloaded' && ev.reason === 'idle') {
+						// title 保持**固定文案**（overlay.js 按整节点等值匹配，含变量就翻不了）；
+						// 模型名放进 description —— 它是纯标识符，本来也不需要翻译。
+						toast.info('Model unloaded to save VRAM - send a message to load it again', {
+							description: ev.model ?? ''
+						});
+					} else if (ev.kind === 'auto_tuned') {
+						const req = ev.requested as Record<string, unknown> | undefined;
+						const app = ev.applied as Record<string, unknown> | undefined;
+
+						// 这条以前是**完全静默**的：用户设了 128K，实际下发 32K，界面一句话都不说。
+						toast.warning('Launch parameters were lowered to fit your VRAM', {
+							description: `${ev.model ?? ''} · ctx ${req?.ctx ?? '?'} → ${app?.ctx ?? '?'}`
+						});
+					}
+				}
+			}
+
+			primed = true;
+			seq = Math.max(...events.map((e) => e.seq));
+		};
+
+		void poll();
+
+		const id = window.setInterval(() => void poll(), 8000);
+
+		return () => window.clearInterval(id);
+	}
 
 	// refresh that snapshot when the tab returns to the foreground, a stream may have advanced
 	// or ended while it was hidden. snapshot only, no polling

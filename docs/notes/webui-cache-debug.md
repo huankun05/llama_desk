@@ -12,6 +12,21 @@
   （**不能挂 body**，水合会换掉）。
 - overlay 版本号由 `deploy.ps1` 读 `ui-src/.overlay-version` 单调 +1（**不能读 index.html**）。
   自证标记 `webui.overlay.boot` / `webui.overlay.diag` —— **永久，勿删**。
+- ⚠️⚠️ **同一个对象字面量里重复的键，后者静默覆盖前者** —— JS 不报错、
+  `node --check` 也查不出来，表现是「某个八竿子打不着的界面文案被改错」。
+  真实事故（2026-09-23）：给空闲卸载加状态胶囊时写了 `'Pinned': '常驻中'`，
+  而 300 行之上上游早就用 `'Pinned': '已置顶'` 翻侧边栏的「置顶对话」
+  → 侧边栏的「已置顶」被改成了「常驻中」，谁都不会想到去那里看。
+  **⚠️ 新增词条前先 grep 一遍键名**；改完 DICT 跑 `python tools/dict/dict_dedupe.py`（预演，不带 `--apply`）。
+  ⚠️ 但**别直接 `--apply`**：它的策略是「保留最后一次出现、删前面」，恰好会保留你新加的
+  那条 → 撞键时的正确修法是**给新文案换个不冲突的键名**（如上面改成 `'Kept loaded'`），
+  而不是让去重工具替你选。
+- ⚠️ **写了新英文文案，必须同步补 DICT**，否则中文界面里孤零零留一行英文。
+  同一个改动里就漏过一次：阶段名、百分比、降档数字全都汉化了，
+  唯独 `Context was lowered to fit your VRAM:` 没进表（截图验收才看出来）。
+  **改完页面跑 `python tools/dict/dict_audit.py <改过的 .svelte>`** ——
+  它会列出「待补词条」，正是这一类漏网。⚠️ 但**截图/文本断言也要跟着看**：
+  探针断言只认英文时，汉化后必然 FAIL（探针侧同样要中英两套写法都认）。
 
 ## 2. manager.py(:8090) 接口与坑
 
@@ -86,7 +101,7 @@
    `sys.exit(1)`，用户拿到的还是**旧代码**（踩过：8090 一直挂着旧 manager，徽章全是「待预演」）。
    杀端口占用：`Get-NetTCPConnection -LocalPort N -State Listen` → `Stop-Process -Force`。
 
-## 8. ⚠️ 写 UI 探针必踩的两个坑（2026-09-22 实测）
+## 8. ⚠️ 写 UI 探针必踩的坑（2026-09-22 起累积）
 
 1. **Tailwind v4 的 `rotate-180` 落在 CSS 独立属性 `rotate` 上，不是 `transform`。**
    只读 `getComputedStyle(el).transform` 会永远得到 `none` → 误判「箭头展开时不旋转」。
@@ -94,9 +109,31 @@
 2. **别用「body 下文本最短/最长的那个 div」找弹出面板** —— bits-ui 的 Content 外面还套了一层
    定位容器（背景透明、圆角 0），一定会命中包裹层 → 误判「系统直角面板」。
    按语义属性找：`[data-slot="dropdown-menu-content"], [role="menu"], [data-dropdown-menu-content]`。
+3. ⚠️⚠️ **Playwright 的 glob 把查询串一起匹配**：`**/props` 要求 URL **以 `/props` 结尾**，
+   而 `PropsService` 请求的是 `./props?autoload=false` → **永远不命中**，
+   伪装静默失效（表象是"改了半天界面毫不理会"）。凡带查询串的端点一律用正则：
+   `/\/props(\?|$)/`、`/\/api\/events(\?|$)/`。
+4. ⚠️ **性能页的「模型是否已加载」看的是 `/props`（`model_path` / `model_alias`），
+   **不是** `/api/instances`**。只伪实例表 → 模型行照旧显示「启动」按钮，
+   倒计时/常驻胶囊整块都不渲染（它们挂在 `{#if loaded}` 里）。
+5. ⚠️ **伪 `/props` / `/api/models` 必须基于真实响应用 `route.fetch()` 改字段，不能自己拼**：
+   真实条目带 `kv_shape` / `ctx_train` / `architecture` 等一整套字段，性能页多个 `$derived`
+   会拿它们算显存与 KV，**少一个就在渲染期抛 `undefined.toFixed()` → 整页白屏**。
+   排查手法：先跑一个"什么都不拦"的裸页面（统计 `pageerror` 数）——为 0 就说明是自己伪造的数据坏了，
+   而不是页面本身有 bug（这个先后顺序能省掉一轮瞎猜）。
+6. ⚠️ **按钮/标签文案被 overlay 汉化**，定位与断言都要中英两套：
+   `page.locator('button', { hasText: /^\s*(Start|启动)\s*$/ })`；
+   断言同理（`/Model failed to start|模型启动失败/`）。**只认英文必然 FAIL。**
+7. ⚠️ **sonner 的 toast 约 4 秒自动消失** → 不能"等满 8 秒再扫一眼"（一定扫不到），
+   要在等待窗口里**持续扫**、命中即停。
+8. ⚠️ **「4px 高 + inline 百分比宽度」不是唯一锚点**：硬件卡的 GPU / VRAM 占用条同形，
+   会先被命中 → 整个场景抓到的是硬件卡文本、断言全错。用**页面上唯一的那串文本**定位
+   （如加载细节行 `\d+% · [\d.]+s / ~[\d.]+s`，它故意不含英文单词所以不会被汉化）。
 
 - 专用探针：`tools/ui/cleanup_probe.mjs`（性能页三处改动 + `--inject` 模拟新 manager）、
-  `tools/ui/idle_dropdown_probe.mjs`（下拉定点：触发器属性 / rotate / 面板真实圆角背景）。
+  `tools/ui/idle_dropdown_probe.mjs`（下拉定点：触发器属性 / rotate / 面板真实圆角背景）、
+  `tools/ui/probe_load_progress_ui.mjs`（加载阶段进度 / 起不来的红条 / 空闲倒计时 / 常驻开关 /
+  一次性 toast，4 场景 18 项 + 出图）。
 
 ## 9. 性能页残留的原生 `<select>`（2026-09-22 已全部清除）
 

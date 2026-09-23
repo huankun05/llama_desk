@@ -12,10 +12,10 @@
 # 跨域已放开（Access-Control-Allow-Origin: *），便于 UI 从不同端口调用。
 # 运行：python manager.py   （默认 http://127.0.0.1:8090）
 # ============================================================
-import os, sys, json, time, uuid, subprocess, threading, math, socket, gzip, email.utils
+import os, sys, re, json, time, uuid, subprocess, threading, math, socket, gzip, email.utils
 import urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 WEBUI_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIRS = [
@@ -1058,6 +1058,11 @@ def start_instance(model_path, name, port, ctx, ctk='', ctv='', ngl=99,
     # 顺序铁律：**先腾端口、等显存归还，再做预演，最后起新实例**。
     # 换模型/重启前要结束占用该端口的旧 llama-server（含 llama-desk 外壳或 .bat
     # 手工拉起的，它们不在 instances 表里）。
+    # 记下用户**请求**的参数：自适应降档（见 AUTO_KV_LADDER）会覆盖 ctx/ctk/batch，
+    # 覆盖之后就再也分不清"用户要的"和"实际下发的"了。事后要向用户明示"已按显存调整"，
+    # 靠的就是这份记录 —— n_ctx_slot 与它不一致就是降过档的铁证。
+    requested = {"ctx": ctx, "ctk": ctk, "ctv": ctv, "batch": batch, "ubatch": ubatch}
+
     freed = free_port(port)
     freed_wait = wait_port_free(port)
     plan = resolve_launch(model_path, ctx, ngl, ctk=ctk, ctv=ctv, np_=np_, fa=flash_attn,
@@ -1116,14 +1121,24 @@ def start_instance(model_path, name, port, ctx, ctk='', ctv='', ngl=99,
             "status": "starting", "logfile": logfile, "started_at": time.time(),
             "freed": freed,
             "mmproj": mmproj, "mmproj_mib": mmproj_mib,
-            # 空闲卸载相关（见 _idle_watchdog）
-            "ttl": ttl, "idle_since": None, "unloaded_reason": None,
+            # 空闲卸载 / 常驻（见 _idle_watchdog 与 /api/instances/<id>/pin）
+            "ttl": ttl, "idle_since": None, "unloaded_reason": None, "pinned": False,
+            # 启动时用户请求的参数（与自适应降档结果对比用）
+            "requested": requested,
             # 本轮显存预演的结论，回给前端展示
             "fit": plan, "args": args,
         }
     # 记下「上一次使用的模型」：外壳以零模型哨兵启动时，界面就靠这份记录显示
     # 「上次使用 · 未加载」，并在首次对话时把同一个模型按需拉起来。
     _remember_last_model(model_path, name)
+
+    # 自适应降档**必须说出来**：它会静默把 128K 改成 32K、把 f16 KV 改成 q4_0，
+    # 用户以为自己设的生效了。记一条事件，界面据此明示一次（见 /api/events）。
+    applied = {"ctx": ctx, "ctk": ctk, "ctv": ctv, "batch": batch, "ubatch": ubatch}
+    if any(str(applied[k]) != str(requested[k]) for k in applied):
+        _emit_event("auto_tuned", id=iid, model=name or os.path.basename(model_path),
+                    port=port, requested=dict(requested), applied=applied)
+
     return instances[iid]
 
 def _prune_dead_records_locked(port):
@@ -1151,6 +1166,9 @@ def stop_instance(iid):
     with inst_lock:
         inst = instances.get(iid)
         if not inst: return False
+        # 只在"真的从活着变成停止"时记事件：stop_instance 会被重复调用
+        # （看门狗 + 用户点卸载 + 换模型前的腾端口），不判这一下就会弹出好几条重复提示。
+        was_alive = inst.get("status") in ("running", "starting")
         proc = inst.get("proc")
         if proc and proc.poll() is None:
             try: proc.terminate()
@@ -1161,7 +1179,13 @@ def stop_instance(iid):
                 if proc.poll() is not None: break
                 time.sleep(0.1)
         inst["status"] = "stopped"
+        # reason 由调用方在停止前写好（看门狗写 'idle'，换模型写 'replaced'），
+        # 没写就是用户主动卸的（manual）。
+        reason = inst.get("unloaded_reason") or "manual"
+        snapshot = {"id": iid, "model": inst.get("model"), "port": inst.get("port")}
     sweep_parked_aliases()
+    if was_alive:
+        _emit_event("unloaded", reason=reason, **snapshot)
     return True
 
 def refresh_status():
@@ -1178,13 +1202,205 @@ def _inst_public(inst):
     给前端的实例视图：去掉不可序列化的 proc，并补上"空闲了多久 / 多久后会卸载"，
     让性能页能显示倒计时（不再只有"已加载"这一个状态）。
     """
-    d = {k: v for k, v in inst.items() if k != "proc"}
+    d = {k: v for k, v in inst.items() if k != "proc" and not k.startswith("_")}
     ttl = inst.get("ttl")
     ttl = IDLE_TTL_DEFAULT if ttl is None else float(ttl)
     d["ttl_seconds"] = ttl
     idle_since = inst.get("idle_since")
     d["idle_seconds"] = round(time.time() - float(idle_since), 1) if idle_since else None
+    # 还要多久被看门狗卸掉（epoch 秒）。**null 必须能被前端区分出三种含义**：
+    #   pinned=True       → 用户要求常驻（Ollama 的 keep_alive:-1）
+    #   ttl_seconds<=0    → 也是常驻，只是用"时长设成 0"表达的同一个意思
+    #   两个都不是        → 只是还没被判定为空闲（idle_since 尚未置位），倒计时不可知
+    # 前端拿到 null 就不显示倒计时，而不是显示"0 秒后卸载"。
+    pinned = bool(inst.get("pinned"))
+    d["pinned"] = pinned
+    d["idle_expires_at"] = None
+    if idle_since and ttl > 0 and not pinned:
+        d["idle_expires_at"] = float(idle_since) + ttl
     return d
+
+
+# ---------- 生命周期事件（/api/events）----------
+# 为什么需要它：界面要"模型被空闲卸载时提示**恰好一次**"，但轮询 /api/instances
+# 推不出这个语义 —— 它只看到"某一刻它没了"，分不清"刚刚卸的"还是"早就卸了"，
+# 也没法区分 idle / manual / replaced。
+#
+# 游标用 seq（单调递增）而不是 epoch：同一秒内可能连着发生多条（换模型 = 卸载 + 加载），
+# 拿秒级时间戳当游标会漏掉后一条。
+# 只留最近 100 条 —— 这是给界面提示用的瞬时队列，不是审计日志。
+EVENTS_MAX = 100
+events_log = []
+events_seq = 0
+events_lock = threading.Lock()
+
+
+def _emit_event(kind, **fields):
+    """记一条生命周期事件：unloaded / auto_tuned。返回事件本身（便于单测）。"""
+    global events_seq
+    with events_lock:
+        events_seq += 1
+        ev = {"seq": events_seq, "at": time.time(), "kind": kind}
+        ev.update(fields)
+        events_log.append(ev)
+        if len(events_log) > EVENTS_MAX:
+            del events_log[:-EVENTS_MAX]
+        return dict(ev)
+
+
+def events_since(since_seq):
+    """since 之后的事件（不含 since 本身）。since 传 0 / None 时返回全部留存事件。"""
+    try:
+        since = int(since_seq or 0)
+    except (TypeError, ValueError):
+        since = 0
+    with events_lock:
+        return [dict(e) for e in events_log if e["seq"] > since]
+
+
+# ---------- 加载进度（/api/instances/<id>/progress）----------
+# 为什么是"读日志"而不是"问 llama-server"：**它没有进度 API**。加载期间
+# `GET /health` 只有 503 `{"error":{"code":503,"message":"Loading model"}}`，
+# 就绪才 200 —— 两档，没有阶段、也没有百分比。
+#
+# 但阶段信息本来就在我们手边：manager 用 `stdout=<inst_<port>.log>` 起进程，
+# 而 llama-server 每一行都自带 `H.MM.SSS.mmm` 时间戳。于是"到哪一步了"是现成的，
+# 不用额外埋点，也不用给 llama.cpp 打补丁。
+#
+# ⚠️ 两个必须守住的点：
+#   ① **只读文件尾部**。日志会一直长（每轮生成都打 print_timing），长跑实例上
+#      全文读纯属浪费；64 KB 足够覆盖开头那几行锚点。
+#   ② **解码走 _decode_bytes**。模型路径含中文时日志字节是 UTF-8/GBK 混合，
+#      直接 .decode('utf-8') 会抛异常 → 阶段解析整段失效（和 _pids_on_port 同一个坑）。
+#      中文路径回归用例见 tools/diag/verify_load_progress.py。
+LOAD_LOG_TAIL_BYTES = 64 * 1024
+
+# 阶段锚点，**必须按日志里的真实先后顺序**排列（解析时取"最后一个命中"的那个）。
+# value 是它在进度条上的位置：不追求精确（日志没给总步数），追求"一直在动"。
+# label 用英文，汉化交给 webui/overlay.js（本项目唯一的本地化源）。
+#
+# 顺序依据 2026-09-23 抓的真实日志（webui/inst_8080.log）：
+#   common_params_print_info → load_model: loading model → threadpool init
+#   → load_hparams → loaded multimodal model → load_model: initializing
+#   → model loaded → listening on http
+# ⚠️ `load_model: loading model`（开始读权重）排在 `llama threadpool init` **之前**，
+#    和直觉相反 —— 别按"先起线程池再读权重"想当然排序，那样永远解析不出 weights。
+LOAD_STAGE_MARKERS = [
+    ("starting",   "Starting process",        r"common_params_print_info|verbosity =", 0.06),
+    ("weights",    "Reading weights",         r"load_model: loading model",             0.30),
+    ("threadpool", "Initializing threads",    r"llama threadpool init",                 0.45),
+    ("hparams",    "Reading hyperparameters", r"load_hparams:",                         0.60),
+    ("mmproj",     "Loading projector",       r"loaded multimodal model",               0.78),
+    ("kv_cache",   "Initializing KV cache",   r"load_model: initializing",              0.90),
+    ("loaded",     "Almost ready",            r"llama_server: model loaded",            0.97),
+    ("listening",  "Ready",                   r"listening on http",                     1.00),
+]
+
+# 启动失败的判据。llama.cpp 起不来时打的词就这几类：参数错 / 显存不够 / 权重坏。
+# 只在日志尾部 2 KB 里找 —— 命中即说明它卡在这一步。
+LOAD_ERROR_RE = re.compile(
+    r"(?i)(error:|failed to|cudamalloc|out of memory|invalid argument|"
+    r"unknown argument|terminate called|no such file|failed to load)"
+)
+
+
+def _load_log_tail(path, nbytes=LOAD_LOG_TAIL_BYTES):
+    """读日志尾部并容错解码。文件不存在 / 读失败时返回空串，绝不抛。"""
+    if not path:
+        return ""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > nbytes:
+                f.seek(size - nbytes)
+            return _decode_bytes(f.read())
+    except OSError:
+        return ""
+
+
+def _health_ok(port, timeout=1.5):
+    """实例的 /health 是否已经 200（= 加载完成、可以接请求了）。"""
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/health" % int(port), timeout=timeout) as r:
+            return 200 <= getattr(r, "status", 200) < 300
+    except Exception:
+        # 加载中返回 503 → HTTPError；端口还没开始监听 → URLError。
+        # 两者都只说明"还没好"，不是错误，所以吞掉。
+        return False
+
+
+def expected_load_ms(model_path, mmproj=None):
+    """
+    按文件大小估加载时长：本机实测**热缓存** ≈ 1.2 s + 0.65 s/GB。
+
+    ⚠️ 这是热缓存口径，冷缓存（首次从盘上读）会明显更慢 —— 所以前端只把它当
+    "预计耗时"的参考值。进度条本身**按阶段推进、不按时间推进**，否则冷启动时
+    会卡在某个百分比上不动，看着像死了。
+    """
+    total = 0
+    for p in (model_path, mmproj):
+        try:
+            if p:
+                total += os.path.getsize(p)
+        except OSError:
+            pass
+    return int(1200 + 650 * (total / float(1024 ** 3)))
+
+
+def load_progress(inst, port=None, health=None):
+    """
+    把一个实例的加载状态解析成给界面用的进度快照。**只读、不抛异常。**
+
+    health 参数只为单测能注入结果；真实调用留空，由 `_health_ok` 实际探测。
+    """
+    text = _load_log_tail(inst.get("logfile"))
+
+    # 取**最后命中**的锚点：日志是追加写的，最后出现的那个阶段就是当前阶段。
+    idx = 0
+    for i, (_k, _l, pat, _v) in enumerate(LOAD_STAGE_MARKERS):
+        if re.search(pat, text):
+            idx = i
+
+    key, label, _pat, value = LOAD_STAGE_MARKERS[idx]
+
+    # 实际生效的上下文长度。它只写在 kv_cache 那行里，是"有没有被自适应降档"的铁证
+    # —— 用户设了 128K、这里却是 32768，就是被降过档。
+    m = re.search(r"n_ctx_slot = (\d+)", text)
+    n_ctx_slot = int(m.group(1)) if m else None
+
+    # 失败特征只看尾部 2 KB：命中即说明它卡在这一步，比让前端干等 120 秒强得多。
+    err_line = None
+    for line in reversed(text[-2048:].splitlines()):
+        if LOAD_ERROR_RE.search(line):
+            err_line = line.strip()
+            break
+
+    p = int(port if port is not None else (inst.get("port") or 0))
+    proc = inst.get("proc")
+    running = bool(proc is not None and proc.poll() is None)
+    healthy = _health_ok(p) if health is None else bool(health)
+
+    return {
+        "phase": key,
+        "label": label,
+        "value": value,
+        "index": idx,
+        # 全量阶段清单：前端据此画步骤条，不必自己维护一份文案（汉化交给 overlay）。
+        "stages": [{"key": k, "label": l, "value": v} for k, l, _p, v in LOAD_STAGE_MARKERS],
+        "n_ctx_slot": n_ctx_slot,
+        # 启动时**请求**的 ctx：与 n_ctx_slot 不同即说明被自动降过档，界面据此明示
+        "requested_ctx": (inst.get("requested") or {}).get("ctx"),
+        "elapsed_ms": int(max(0.0, time.time() - float(inst.get("started_at") or time.time())) * 1000),
+        "expected_ms": expected_load_ms(inst.get("model_path"), inst.get("mmproj")),
+        "running": running,
+        "healthy": healthy,
+        # 只有"进程活着 + /health 200 + 走到最后一个锚点"才算真的好了。
+        # 少任一条都会在换模型场景下误判（端口上还留着上一轮进程、或刚起还没读盘）。
+        "done": bool(running and healthy and idx >= len(LOAD_STAGE_MARKERS) - 1),
+        "error": err_line,
+        "log_tail": [l.strip() for l in text.splitlines()[-3:] if l.strip()],
+    }
+
 
 # ---------- 空闲卸载（TTL）----------
 # 参考 Ollama 的 OLLAMA_KEEP_ALIVE（默认 5 分钟）与 LM Studio 的 Idle TTL：
@@ -1272,10 +1488,12 @@ def _idle_tick(now=None):
             continue
         if now - float(inst.get("started_at") or 0) < IDLE_GRACE:
             continue
+        if inst.get("pinned"):
+            continue   # 用户右键「保持常驻」（对齐 Ollama 的 keep_alive: -1）
         ttl = inst.get("ttl")
         ttl = IDLE_TTL_DEFAULT if ttl is None else float(ttl)
         if ttl <= 0:
-            continue   # 用户要求常驻
+            continue   # 时长设成"永不"，和 pin 同一个意思的另一种说法
         busy = _server_busy(inst.get("port") or 8080)
         expired = False
         with inst_lock:
@@ -2212,6 +2430,49 @@ class Handler(BaseHTTPRequestHandler):
                 with inst_lock:
                     lst = [_inst_public(i) for i in instances.values()]
                 self.json(200, lst)
+            elif p.startswith("/api/instances/") and p.endswith("/progress"):
+                # 加载进度快照。前端在"等模型 ready"的那段时间里 1 秒级轮询它，
+                # 把干等变成"读取权重 45%"。
+                iid = p[len("/api/instances/"):-len("/progress")].strip("/")
+                with inst_lock:
+                    inst = dict(instances.get(iid) or {})
+                if not inst:
+                    self.json(404, {"error": "no such instance", "id": iid})
+                else:
+                    # ⚠️ 必须在锁外算：load_progress 会去探 /health（网络调用），
+                    #    攥着 inst_lock 等网络会拖住看门狗和所有实例请求。
+                    self.json(200, load_progress(inst))
+            elif p.startswith("/api/instances/") and p.endswith("/pin"):
+                # 保持常驻 / 取消常驻。对齐 Ollama 的 keep_alive: -1 —— 看门狗跳过它，
+                # 解决"常用的那个模型被卸掉"这个真实痛点。
+                iid = p[len("/api/instances/"):-len("/pin")].strip("/")
+                with inst_lock:
+                    inst = instances.get(iid)
+                    if inst is not None:
+                        inst["pinned"] = bool((data or {}).get("pinned"))
+                        out = {"ok": True, "id": iid, "pinned": bool(inst.get("pinned"))}
+                    else:
+                        out = {"ok": False, "id": iid, "pinned": None}
+                self.json(200, out)
+            elif p.startswith("/api/instances/") and p.endswith("/ttl"):
+                # 改自动卸载时长。0 或负数 = 永不卸载（和 pin 一个意思，只是表达成"时长"）。
+                iid = p[len("/api/instances/"):-len("/ttl")].strip("/")
+                try:
+                    ttl_new = float((data or {}).get("ttl_seconds"))
+                except (TypeError, ValueError):
+                    ttl_new = None
+                if ttl_new is None:
+                    self.json(400, {"error": "ttl_seconds must be a number"})
+                else:
+                    with inst_lock:
+                        inst = instances.get(iid)
+                        if inst is not None:
+                            inst["ttl"] = ttl_new
+                            # ⚠️ 换了时长必须把空闲计时清零。否则「刚把 5 分钟改成 10 分钟、
+                            #    而它已经闲了 9 分钟」会在下一跳(最多 5s 后)立刻被卸掉，
+                            #    用户看到的现象是"改了时长反而马上被卸"，像没生效。
+                            inst["idle_since"] = None
+                    self.json(200, {"ok": inst is not None, "id": iid, "ttl_seconds": ttl_new})
             elif p.startswith("/api/instances/") and p.endswith("/log"):
                 # 实例日志尾部：启动失败时前端拉它来还原**真实原因**（如 cudaMalloc failed），
                 # 而不是只丢一个 "timeout" 给用户。
@@ -2229,6 +2490,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 if self.command != "HEAD":
                     self.wfile.write(b)
+            elif p == "/api/events":
+                # 生命周期事件增量。前端拿它弹"已为省显存卸载 X"这类**恰好一次**的提示
+                # —— 只轮询 /api/instances 的话，推不出"刚刚发生"和"为什么"。
+                since = parse_qs(u.query).get("since", ["0"])[0]
+                self.json(200, {"events": events_since(since)})
             elif p.startswith("/api/instances/"):
                 iid = p.split("/")[-1]
                 ok = stop_instance(iid)

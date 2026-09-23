@@ -48,6 +48,7 @@ tools\
 | `i18n_audit.mjs <url>` | **中英文漏翻审计**：分「文本漏翻」和「属性漏翻」两类报，并做 zh→en→zh 语言切换自检。<br>`node tools/ui/i18n_audit.mjs http://127.0.0.1:8080` |
 | `cleanup_ui_check.mjs <url>` | 验证性能页「显存清理」卡与「模型专属参数」卡的 9 个字段。 |
 | `cleanup_probe.mjs [--inject]` | **性能页三处改动的验收探针**：① 预演按钮是否在「加载后预测显存占用」卡内；② 空闲下拉是否已自绘（无原生 `<select>`、箭头 rotate 随展开变化、面板圆角）；③ 清理卡是否**不给「别的程序的进程」卸载入口**。`--inject` 拦截 `/api/gpu-cleanup` 注入「新版 manager」载荷 → 同时验证过渡期降级与正式行为。<br>⚠️ 读箭头要读 CSS `rotate`（Tailwind v4 不用 `transform`）；找面板要按 `[role=menu]` 找，别按文本猜。 |
+| `probe_load_progress_ui.mjs` | **C+D 的端到端验收探针**（4 场景 18 项 + 出图到 `diag/shots-20260923-c/`）：① 加载中的分阶段进度（阶段名 / 百分比·已用·预计 / 自动降档明示 / 进度条宽度）；② 起不来时**红条 + 真实原因**而不是干等超时；③ 空闲倒计时＋常驻开关（真调 `/pin` 且 `pinned=true`）＋卸载后**恰好一次** toast；④ 常驻中显示「常驻中」且不再显示倒计时。<br>手法：**只拦后端响应，前端一行不改**（`/api/switch`、`/health`、`/api/instances/<id>/progress`、`/api/instances`、`/api/events`、`/props`），走的是同一条前端代码路径。<br>⚠️ `/api/models` **绝不拦**（要真实字段，伪一条会导致整页白屏）；⚠️ 带查询串的端点必须用正则拦（`**/props` 匹配不到 `?autoload=false`）；⚠️ 性能页判「已加载」看的是 `/props` 不是 `/api/instances`。详见 `docs/notes/webui-cache-debug.md` §8。 |
 | `idle_dropdown_probe.mjs` | **「空闲卸载」下拉定点诊断**：触发器 class/`data-state`、箭头 `rotate`、弹出面板真实圆角/背景/层级链。怀疑「下拉 UI 还是系统组件」时先跑它。 |
 | `mock_webui_server.py` | 没有后端时起一个假 `:8080`，用来单独验 UI（静态目录写死 `D:\llama\webui`）。 |
 | `start_for_ui.py` | 起一个测试用模型实例（给 UI 验证提供数据源），用完自动空闲卸载。 |
@@ -85,6 +86,7 @@ node tools/ui/ui_probe.mjs http://127.0.0.1:8080
 | `metrics_bench.py <model.gguf> <port> <ctx>` | 量 `/api/system-metrics` 的响应耗时（当年 2366ms → <5ms 的验证工具）。 |
 | `cleanup_probe.py` | 免重启跑一遍显存清理的**只读**盘点逻辑（列出所有 llama-server 进程并分类）。 |
 | `../diag/verify_gpu_cleanup_kinds.py` | **分类逻辑单测**（离线、6 个伪造进程 + 真实踩坑场景）：`exe` 路径匹配 **且**命令行带我们的 `-a/--alias` 才算 `orphan`，否则一律 `foreign`。改分类规则后必跑。 |
+| `../diag/verify_load_progress.py` | **加载进度 + 空闲卸载可见性的离线单测**（49 项，全绿才提交）：① 8 个阶段锚点的**先后顺序**（用真实日志前缀逐行截断验证，不是拿假字符串）；② 满日志的 `n_ctx_slot` / `done` 三条件矩阵；③ **中文路径**分别按 UTF-8 与 GBK 写盘各验一遍（`_decode_bytes` 回归）；④ 失败早停；⑤ 日志不存在/为空时不抛异常；⑥ 事件环形缓冲与 `seq` 游标；⑦ `pinned` 实例被 `_idle_tick` 跳过；⑧ `_inst_public` 的 `idle_expires_at` 三种 `null` 语义。<br>⚠️ 断言要照**设计意图**写：假端口上没有服务时 `_server_busy` 返 `None` → 设计就是"重置 `idle_since`"（未知即永不卸载），别把它当成 bug。 |
 | `fit_compare.mjs <abs.gguf> [k=v,...]` | **对比不同启动参数下的上卡层数与显存账本**（调 manager `/api/fit`，只读、不起实例）。模型路径必须**绝对路径**。不给参数时跑内置对照组（f16/q8_0/q4_0 KV × batch × 上下文），用来定位"为什么掉层"。 |
 | `gguf_info.py <a.gguf> [...]` | 读 GGUF 头部：架构、层数、头数、KV 维度、量化类型、训练上下文。 |
 | `gguf_kvscan.py <a.gguf> [...]` | 只打印注意力 / 滑动窗口 / SSM 相关元数据键，用于判断 KV 架构与精确算 KV 体积。 |
