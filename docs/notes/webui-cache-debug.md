@@ -110,3 +110,16 @@
 给**已存在**的文件追加内容时，`cat >> f << EOF` / `>>` / `tee -a` / `sed -i` 会**静默覆盖文件头部**。
 一律用 `node tools/ops/append_file.mjs <目标文件> <片段文件>`（片段先用 Write 工具落成 UTF-8 文件）。
 若已中招：`git checkout HEAD -- <file>` 可完整还原（跟踪文件零丢失）。
+
+## 11. 给 UI 改动截「证据图」的正确姿势（2026-09-23）
+
+脚本：`tools/ui/shots_round_perf.mjs`（按 `data-shot` 钩子定位，`Locator#screenshot()` 出图）。
+关键点：
+
+1. **先在页面里 `evaluate` 打 `data-shot` 标记**，再按属性选择器截图。别按文案定位
+   —— overlay 会把英文翻成中文，文案一变选择器就废。
+2. ⚠️⚠️ **不要用「`getBoundingClientRect` + `clip` + `fullPage: true`」**：
+   `fullPage` 会把视口拉成整页高度 → 触发**重排** → floating-ui 借机**重新定位**弹出面板，
+   先量好的坐标立刻失效（截出来是页脚/空白）。用 `Locator#screenshot()` 让它自己滚进视区再裁。
+3. 弹出面板（bits-ui 的 `Content`）是 **portal 到 body** 的，不在触发器子树里 ——
+   想同时拍「触发器 + 面板」得分别截两张，别指望截容器一次拿到。
