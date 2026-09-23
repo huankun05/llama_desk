@@ -1213,7 +1213,14 @@ def _server_busy(port):
 # ---------- 版本信息（/api/ping）----------
 # 背景（2026-09-21）：Tauri 外壳只在启动时 spawn 一次 manager.py，而且 **:8090 已被占用时
 # 会跳过 spawn** —— 所以"磁盘上的 manager.py 更新了、但 :8090 上跑的还是旧代码"完全可能
-# （症状：新端点 404）。把脚本 mtime 暴露出来，就能一眼判断跑的是不是当前版本。
+# （症状：新端点 404、前端新加的字段全是 undefined）。把版本信息暴露出来就能一眼判断。
+#
+# ⚠️ 踩过的坑（2026-09-22）：只暴露 `script_mtime` **判断不了**这件事 ——
+#    `_script_mtime()` 是**实时**读 os.path.getmtime，于是它和磁盘上的文件 mtime 恒等
+#    （拿它去跟 getmtime 比永远「一致」）。正确判据是：
+#      **进程启动时刻（STARTED_AT / SCRIPT_MTIME_AT_START） vs 磁盘 mtime**
+#      —— 启动时记下的那份 mtime 与当前 mtime 不一致 ⇒ 跑的是旧代码。
+#    现在直接给出 `stale` 布尔值，别再让调用方自己推。
 #
 # ⚠️ 曾实现过"检测到 mtime 变化就自己拉起新进程、旧进程退出"，**实测危险，已撤掉**：
 #    新进程一旦起不来（端口竞争 / 被杀 / 新代码导入错误），旧进程却已经退出
@@ -1227,6 +1234,18 @@ def _script_mtime():
         return os.path.getmtime(SCRIPT_PATH)
     except OSError:
         return None
+
+
+# 进程启动那一刻的脚本 mtime：拿它跟"当前 mtime"比，才能看出磁盘上的代码有没有变过。
+SCRIPT_MTIME_AT_START = _script_mtime()
+
+
+def _is_stale():
+    """True = 磁盘上的 manager.py 在本进程启动之后被改过 ⇒ 跑的是旧代码，需重启。"""
+    now = _script_mtime()
+    if now is None or SCRIPT_MTIME_AT_START is None:
+        return None
+    return now > SCRIPT_MTIME_AT_START + 1e-6
 
 
 def _idle_watchdog():
@@ -1418,6 +1437,27 @@ _EMPTY_CPU_STATIC = {"cpu_name": None, "cpu_cores": None, "cpu_threads": None,
 # （实测就漏过一个实例：pid 20404 / :8080 / 793 MiB，/api/instances 里查不到。）
 # 本节负责把「谁在占显存、哪些没人管」算清楚，并提供**安全**的清理动作。
 #
+# ⚠️⚠️ 2026-09-22 重要修正（两轮，第二轮的结论才是对的）：
+#
+# 第一轮（错）：以为界面那两行 1520.9 MiB / :17983、:17987 是 Ollama/Docker 的进程 ——
+#   因为本机确实装了 3 份同名 exe（① D:\llama\bin\llama-server.exe ② D:\Ollama\lib\ollama\
+#   ③ C:\Users\<u>\.docker\bin\inference\），于是先加了"按 exe 路径区分"。
+#
+# 第二轮（对）：拿完整命令行一看，**exe 就是我们自己那份**，只是参数不是我们那套：
+#       D:\llama\bin\llama-server.exe --model D:\llama\models\Hy-MT2-1.8B-Q4_K_M.gguf
+#         --host 127.0.0.1 --port 12259 --jinja -c 4096 --threads 12
+#   —— 这是**用户自己的 OCR 项目**（F:\Work\Create\OCR 的 python 服务）拿我们的 exe 起的
+#      Hy-MT2-1.8B 翻译实例。它们的模型名之所以在界面上是空的，是因为旧探针只认 `-m` / `-a`，
+#      不认 `--model` / `--alias` 长参数 → 两行一模一样的 "1520.9 MiB / 无人管理" 看着像野进程。
+#
+# ⇒ 结论：**exe 路径 + 启动参数，两个都要看**：
+#   managed  = 本管理器启动的
+#   active   = 占着活跃端口（= 你正在用的那个）
+#   orphan   = exe 是我们那份 **且** 参数带 `-a <别名>`（本管理器 / start-*.bat 的签名）、
+#              又不在实例表也不占活跃端口 = 真残留，**只有这种进"一键清理"**
+#   foreign  = 其余全部（别的 exe、别的程序用我们的 exe、或信息不足判断不了）→ 受保护，绝不清理
+# 判定原则：**宁可漏清一个残留，也绝不误杀别的程序正在用的模型。**
+#
 # ⚠️ 按进程显存**不能用** nvidia-smi --query-compute-apps：本机是 WDDM 笔记本，
 # 该查询对**所有**进程都返回 [N/A]（实测）。唯一可行来源是 WDDM 性能计数器
 # Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory.DedicatedUsage，
@@ -1444,6 +1484,72 @@ def _active_port():
         pass
     return ACTIVE_PORT_FALLBACK
 
+def _own_server_exe():
+    """
+    **本应用**那份 llama-server.exe 的规范路径（normcase+abspath）；读不到配置返回 None。
+    用来把「别的程序装的同名 exe」认出来（Ollama / Docker / LM Studio 都叫 llama-server.exe）。
+    """
+    try:
+        cfgp = os.path.join(WEBUI_DIR, "..", "app", "config.json")
+        with open(cfgp, "r", encoding="utf-8") as f:
+            p = json.load(f).get("llama_server")
+        if isinstance(p, str) and p.strip():
+            return os.path.normcase(os.path.abspath(p.strip()))
+    except Exception:
+        pass
+    # 兜底：本仓库的既定布局是 <root>/bin/llama-server.exe（写死也不会误伤，
+    # 因为只有路径**完全相等**才会被认成"我们的"，认不出时宁可当残留也不乱标别人）。
+    try:
+        return os.path.normcase(os.path.abspath(
+            os.path.join(WEBUI_DIR, "..", "bin", "llama-server.exe")))
+    except Exception:
+        return None
+
+def _same_exe(exe, own):
+    """exe 是否就是 own 那一份。任一方拿不到就返回 None（= 判断不了）。"""
+    if not exe or not own:
+        return None
+    try:
+        return os.path.normcase(os.path.abspath(exe)) == own
+    except Exception:
+        return None
+
+def _looks_like_our_launch(cmdline):
+    """
+    「这是我们自己那套启动参数」的**正向证据** —— 判 orphan 的必要条件。
+
+    ⚠️ 为什么不能只看 exe 路径：同一份 `D:\\llama\\bin\\llama-server.exe` 也会被别人拿去用。
+    实测用户自己的 OCR 项目（`F:\\Work\\Create\\OCR`）就用它起
+    `--model …\\Hy-MT2-1.8B-Q4_K_M.gguf --host 127.0.0.1 --port <随机端口> --jinja -c 4096 --threads 12`
+    —— exe 一模一样，**只有参数风格不同**。
+
+    本管理器的启动参数恒带 `-a <别名>`（见 `start_instance`），仓库里的 `start-*.bat` 也带；
+    而外部脚本用的是 `--model` / `--threads` 这类长参数、不带 `-a`。
+    拿不到命令行时返回 None（= 判断不了），调用方按"不是我们的"处理。
+    """
+    if not cmdline:
+        return None
+    return " -a " in cmdline or " --alias " in cmdline
+
+def _foreign_source(exe, parent, own=None):
+    """
+    别的程序启动的 llama-server，尽量认到具体是谁 —— 界面直接告诉用户"去哪个程序里卸载"，
+    比一句笼统的"无人管理"有用得多。
+    """
+    blob = ("%s %s" % (exe or "", parent or "")).lower()
+    if "ollama" in blob:
+        return "Ollama"
+    if "docker" in blob:
+        return "Docker"
+    if "lmstudio" in blob or "lm studio" in blob:
+        return "LM Studio"
+    if parent:
+        return parent
+    # 父进程已经退出、又用的是我们这份 exe → 只能是"外部脚本临时起的"
+    if own and exe and os.path.normcase(os.path.abspath(exe)) == own:
+        return "external script"
+    return "unknown"
+
 def _ps_encoded(script, timeout=25.0):
     """
     跑一段 PowerShell，返回 stdout 文本。
@@ -1459,16 +1565,25 @@ def _ps_encoded(script, timeout=25.0):
 
 _PS_PROCS_GPU = r"""
 $ErrorActionPreference = 'SilentlyContinue'
-Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'llama-server.exe' } | ForEach-Object {
+$all = Get-CimInstance Win32_Process
+$names = @{}
+foreach ($q in $all) { $names[[string]$q.ProcessId] = [string]$q.Name }
+foreach ($_ in $all) {
+  if ($_.Name -ne 'llama-server.exe') { continue }
   $port = ''
   if ($_.CommandLine -match '--port\s+(\d+)') { $port = $Matches[1] }
+  # 别名/模型都要认**长参数**：`--alias` / `--model`。
+  # 2026-09-22 实测教训：只认 `-a` / `-m` 时，用户 OCR 项目用
+  # `--model D:\llama\models\Hy-MT2-1.8B-Q4_K_M.gguf ...` 起的实例在界面上**模型名是空的**，
+  # 于是两行一模一样的 "1520.9 MiB / 无人管理" 看起来像恐怖的东西 —— 其实写着模型名就不慌了。
   $alias = ''
-  if ($_.CommandLine -match ' -a\s+(.+?)\s+-\w') { $alias = $Matches[1].Trim('"') }
+  if ($_.CommandLine -match '(?:^|\s)(?:--alias|-a)\s+("[^"]*"|\S+)') { $alias = $Matches[1].Trim('"') }
   $model = ''
-  if ($_.CommandLine -match '-m\s+(\S+)') { $model = Split-Path $Matches[1] -Leaf }
+  if ($_.CommandLine -match '(?:^|\s)(?:--model|-m)\s+("[^"]*"|\S+)') { $model = Split-Path $Matches[1].Trim('"') -Leaf }
   $created = ''
   if ($_.CreationDate) { $created = $_.CreationDate.ToString('yyyy-MM-dd HH:mm:ss') }
-  'P' + "`t" + $_.ProcessId + "`t" + $port + "`t" + $alias + "`t" + $model + "`t" + $created
+  # CommandLine 放**最后一个**字段：里面万一有制表符也不会挤坏前面的列
+  'P' + "`t" + $_.ProcessId + "`t" + $port + "`t" + $alias + "`t" + $model + "`t" + $created + "`t" + [string]$_.ExecutablePath + "`t" + $names[[string]$_.ParentProcessId] + "`t" + [string]$_.CommandLine
 }
 Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory | Where-Object {
   [int64]$_.DedicatedUsage -gt 0
@@ -1515,6 +1630,10 @@ def _scan_procs_and_gpu(force=False):
                     "alias": parts[3] or None,
                     "model": parts[4] or None,
                     "started": parts[5] or None,
+                    # 2026-09-22 新增：来源识别（见本节顶部注释）
+                    "exe": (parts[6] or None) if len(parts) > 6 else None,
+                    "parent": (parts[7] or None) if len(parts) > 7 else None,
+                    "cmdline": (parts[8] or None) if len(parts) > 8 else None,
                 })
             elif parts[0] == "G" and len(parts) >= 3:
                 try:
@@ -1550,12 +1669,17 @@ def parked_aliases():
 def cleanup_report(force=False):
     """
     只读盘点，回答两个问题：**显存被谁占了**、**哪些 llama-server 没人管**。
-    分类：managed（本管理器起的）/ active（占着活跃端口，属于"正在用"）/ orphan（没人管）。
-    orphan 才允许"一键清理"；active 和 managed 只能由用户逐行点「卸载」。
+    分类（2026-09-22 起按 exe 路径区分，见本节顶部注释）：
+      managed = 本管理器启动的
+      active  = 占着活跃端口（= 你正在用的那个）
+      foreign = **别的程序**（Ollama / Docker / LM Studio…）启动的同名进程 —— 受保护
+      orphan  = 确实是本应用那份 exe、却既不在实例表里也不占活跃端口 = 真残留
+    只有 orphan 会被"一键清理"。foreign 永远不参与 —— 防止误杀用户其他程序的模型。
     """
     procs, gpu = _scan_procs_and_gpu(force=force)
     used, total = gpu_totals()
     active = _active_port()
+    own = _own_server_exe()
     live = {p["pid"] for p in procs}
     refresh_status()
 
@@ -1576,20 +1700,30 @@ def cleanup_report(force=False):
             kind, protected = "managed", True
         elif p["port"] == active:
             kind, protected = "active", True
-        else:
+        elif (_same_exe(p.get("exe"), own) is True
+                and _looks_like_our_launch(p.get("cmdline")) is True):
+            # ① exe 就是我们那份 ② 参数也是我们那套（带 -a 别名）→ 才敢认成"自己的残留"
             kind, protected = "orphan", False
+        else:
+            # exe 不是我们的、参数不是我们的、或**根本判断不了** → 一律"别的程序"、受保护。
+            # 原则：宁可漏清一个残留，也绝不误杀别的程序正在用的模型。
+            kind, protected = "foreign", True
         rows.append({**p, "vram_mib": gpu.get(p["pid"]), "kind": kind,
                      "protected": protected,
+                     "source": (_foreign_source(p.get("exe"), p.get("parent"), own)
+                                if kind == "foreign" else None),
                      "instance_id": inst["id"] if inst else None})
     # 先把"有人管的"排前面，再按显存从大到小 —— 用户最想先看见吃显存最多的那个
     rows.sort(key=lambda r: (r["protected"], -(r["vram_mib"] or 0)))
 
-    orphans = [r for r in rows if not r["protected"]]
+    orphans = [r for r in rows if r["kind"] == "orphan"]
     return {
         "gpu": {"used_mib": used, "total_mib": total},
         "active_port": active,
+        "own_exe": own,
         "processes": rows,
         "orphans": orphans,
+        "foreign_processes": [r for r in rows if r["kind"] == "foreign"],
         "reclaimable_mib": round(sum(r["vram_mib"] or 0 for r in orphans), 1),
         "stale_instances": stale,
         "parked_aliases": parked_aliases(),
@@ -1913,10 +2047,14 @@ class Handler(BaseHTTPRequestHandler):
         p = u.path
         try:
             if p == "/api/ping":
-                # 轻量自检：用来判断 :8090 上跑的是不是磁盘上当前这份 manager.py
+                # 轻量自检：用来判断 :8090 上跑的是不是磁盘上当前这份 manager.py。
+                # ⚠️ 别只看 script_mtime —— 它是**实时**读的，永远等于磁盘 mtime。
+                #    看 `stale`（启动后脚本被改过）或 started_at vs 磁盘 mtime。
                 self.json(200, {"ok": True, "pid": os.getpid(),
                                 "started_at": STARTED_AT,
-                                "script_mtime": _script_mtime()})
+                                "script_mtime": _script_mtime(),
+                                "script_mtime_at_start": SCRIPT_MTIME_AT_START,
+                                "stale": _is_stale()})
             elif p == "/api/last-model":
                 # 「上一次使用的模型」（见 get_last_model 的注释）。应用以零模型哨兵
                 # 启动时，界面靠它显示「上次使用 · 未加载」，并在首次对话时按需加载。
@@ -2008,6 +2146,13 @@ class Handler(BaseHTTPRequestHandler):
                 killed, skipped = [], []
                 for pid in want:
                     row = by_pid.get(pid) or {}
+                    if row.get("kind") == "foreign":
+                        # 别的程序（Ollama / Docker…）的模型 runner：不替别的程序做卸载决定。
+                        # 界面已经不提供这个按钮，这里是服务端兜底，防手工构造请求误杀。
+                        skipped.append({"pid": pid,
+                                        "reason": "started by another app (%s)"
+                                                  % (row.get("source") or "?")})
+                        continue
                     ok, img = kill_llama_pid(pid)
                     if ok:
                         killed.append({"pid": pid, "image": img,
@@ -2206,10 +2351,10 @@ if __name__ == "__main__":
     if _port_taken(PORT):
         print(f"!! 端口 {PORT} 上已经有管理器在跑了，本进程退出（避免两个实例抢同一端口）。")
         print(f"   想让本次代码生效：先双击 webui\\restart-manager.bat 停掉旧的，再启动。")
-        print(f"   想确认在跑的是哪份代码：curl http://127.0.0.1:{PORT}/api/ping 看 script_mtime")
+        print(f"   想确认在跑的是哪份代码：curl http://127.0.0.1:{PORT}/api/ping 看 stale / started_at")
         sys.exit(1)
     print(f"llama.cpp 管理器启动: http://127.0.0.1:{PORT} (PID {os.getpid()})")
-    print(f"  脚本版本: mtime={_script_mtime()}  (对不上说明跑的不是当前代码)")
+    print(f"  脚本版本: mtime={_script_mtime()} (启动时刻记下，之后磁盘被改过即 stale=True)")
     print(f"  WebUI 目录: {WEBUI_DIR}")
     print(f"  llama-server: {LLAMA_SERVER}")
     print(f"  llama-fit-params: {LLAMA_FIT}{'' if os.path.isfile(LLAMA_FIT) else '  ← 缺失！换模型将退化为启动期拟合'}")

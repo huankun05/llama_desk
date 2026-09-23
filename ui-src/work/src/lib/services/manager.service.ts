@@ -209,11 +209,23 @@ export interface ManagerGpuProcess {
 	/** 按进程专用显存 MiB（WDDM 计数器，**参考值**；拿不到为 null） */
 	vram_mib: number | null;
 	/**
-	 * managed = 本管理器启动的；active = 占着活跃端口（= 你正在用的那个）；
-	 * orphan = 没人管（既不在实例表里、也不占活跃端口）—— 只有这种会被"一键清理"结束。
+	 * 进程可执行文件路径。本机装了多份同名 `llama-server.exe`（本应用的 `bin/`、
+	 * Ollama 的 `lib/ollama/`、Docker Desktop 的 inference/）—— 靠它区分是谁的。
 	 */
-	kind: 'managed' | 'active' | 'orphan';
+	exe?: string | null;
+	/** 父进程映像名（如 `ollama app.exe`）；用于认出"别的程序启动的" */
+	parent?: string | null;
+	/**
+	 * managed = 本管理器启动的；
+	 * active  = 占着活跃端口（= 你正在用的那个）；
+	 * foreign = **别的程序**（Ollama / Docker / LM Studio…）启动的同名进程 —— 受保护，永不参与一键清理；
+	 * orphan  = 确实是本应用那份 exe、却既不在实例表里也不占活跃端口 = 真残留
+	 *           —— 只有这种会被"一键清理"结束。
+	 */
+	kind: 'managed' | 'active' | 'foreign' | 'orphan';
 	protected: boolean;
+	/** kind === 'foreign' 时的来源名（`Ollama` / `Docker` / 父进程名） */
+	source?: string | null;
 	instance_id: string | null;
 }
 
@@ -221,8 +233,12 @@ export interface ManagerGpuProcess {
 export interface ManagerGpuCleanupReport {
 	gpu: { used_mib: number | null; total_mib: number | null };
 	active_port: number;
+	/** 本应用那份 llama-server.exe 的规范路径（判"是不是我们的"依据） */
+	own_exe?: string | null;
 	processes: ManagerGpuProcess[];
 	orphans: ManagerGpuProcess[];
+	/** 别的程序启动的同名 llama-server —— 界面只展示，不提供卸载入口 */
+	foreign_processes?: ManagerGpuProcess[];
 	reclaimable_mib: number;
 	/** 实例表里记着"在跑"、进程却已经没了的脏记录 */
 	stale_instances: { id: string; pid: number | null; model: string | null; port: number | null }[];

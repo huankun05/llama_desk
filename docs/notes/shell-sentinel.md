@@ -10,7 +10,13 @@
 - **配置查找顺序**（`config.rs::candidates`）：`LLAMA_DESK_CONFIG` → **exe 同目录** → 上级 → 再上级 → 编译期 `CARGO_MANIFEST_DIR` 的父目录（= `app/`）。**exe 旁那份优先**。
 - ⚠️ 只在**启动时** spawn `manager.py`（**无守护、无重启**），且 `:8090` 被占就跳过
   → 改完 `manager.py` **最干净的做法是重启应用**（app 退出时会 `stop_owned` 杀掉它自己的 manager）。
-  判断 8090 上跑的是不是磁盘当前这份：`GET /api/ping` 的 `script_mtime` vs `os.path.getmtime(manager.py)`。
+  ⭐ **更轻的替代**：双击 **`webui\restart-manager.bat`** —— 它只杀掉占着 8090 的 **python** 进程
+  （非 python 的只告警不动），等端口真空再 `python manager.py`，**不用重启整个应用**。
+  那个控制台窗口就是管理器的控制台，别关。
+  判断 8090 上跑的是不是磁盘当前这份：`GET /api/ping` 看 **`stale`**（true = 本进程启动后脚本被改过）。
+  ⚠️⚠️ **别再用 `script_mtime` vs `os.path.getmtime(manager.py)` 比** —— `script_mtime` 是**实时**读的，
+  与磁盘文件恒等，比出来永远是「一致」（2026-09-22 实测踩坑）。要么看 `stale`，要么比
+  `started_at` 与磁盘 mtime：`started_at < mtime` ⇒ 跑的是旧代码。
 - **8080 上的 UI 由 llama-server 用 `--path D:\llama\webui` 提供**；manager 在 8090 **不代理** `/v1`/`/props`/`/slots`
   → **8090 不能当 UI 入口**（模型信息全空）。
 - ⚠️ `SO_REUSEADDR` 会让**两个 manager 同绑 8090**（请求在旧/新代码间分流 =「改了不生效」）

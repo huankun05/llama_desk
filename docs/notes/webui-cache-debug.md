@@ -85,3 +85,28 @@
 7. ⚠️⚠️ **验证完必须停掉自己起的进程，并且清掉 8090**：否则用户重启应用时新 manager 因端口被占
    `sys.exit(1)`，用户拿到的还是**旧代码**（踩过：8090 一直挂着旧 manager，徽章全是「待预演」）。
    杀端口占用：`Get-NetTCPConnection -LocalPort N -State Listen` → `Stop-Process -Force`。
+
+## 8. ⚠️ 写 UI 探针必踩的两个坑（2026-09-22 实测）
+
+1. **Tailwind v4 的 `rotate-180` 落在 CSS 独立属性 `rotate` 上，不是 `transform`。**
+   只读 `getComputedStyle(el).transform` 会永远得到 `none` → 误判「箭头展开时不旋转」。
+   探针里两个都读；判据是 `rotate` 从 `none` 变成 `-180deg`。
+2. **别用「body 下文本最短/最长的那个 div」找弹出面板** —— bits-ui 的 Content 外面还套了一层
+   定位容器（背景透明、圆角 0），一定会命中包裹层 → 误判「系统直角面板」。
+   按语义属性找：`[data-slot="dropdown-menu-content"], [role="menu"], [data-dropdown-menu-content]`。
+
+- 专用探针：`tools/ui/cleanup_probe.mjs`（性能页三处改动 + `--inject` 模拟新 manager）、
+  `tools/ui/idle_dropdown_probe.mjs`（下拉定点：触发器属性 / rotate / 面板真实圆角背景）。
+
+## 9. 性能页残留的原生 `<select>`（2026-09-22 已全部清除）
+
+「加载后预测显存占用」卡片里原本还有两个原生 `<select>`（方案选择带 `<optgroup>`、`KV 精度`），
+**和空闲卸载下拉是同一个毛病**（系统直角弹出层、箭头不跟展开状态、易压字）。现已全部换成
+`DropdownMenu`；分组用 `DropdownMenu.Group` + `GroupHeading` 还原 `<optgroup>`。
+排查「还有没有漏网的原生 select」：`node tools/diag/list_native_selects.mjs`（正常应输出 `[]`）。
+
+## 10. 追加文件千万别用 shell `>>`（沙箱陷阱）
+
+给**已存在**的文件追加内容时，`cat >> f << EOF` / `>>` / `tee -a` / `sed -i` 会**静默覆盖文件头部**。
+一律用 `node tools/ops/append_file.mjs <目标文件> <片段文件>`（片段先用 Write 工具落成 UTF-8 文件）。
+若已中招：`git checkout HEAD -- <file>` 可完整还原（跟踪文件零丢失）。

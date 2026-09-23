@@ -47,6 +47,8 @@ tools\
 | `cache_probe.mjs <url>` | 验证缓存层：首次加载 vs 二次加载的字节数（看 304 是否生效）。 |
 | `i18n_audit.mjs <url>` | **中英文漏翻审计**：分「文本漏翻」和「属性漏翻」两类报，并做 zh→en→zh 语言切换自检。<br>`node tools/ui/i18n_audit.mjs http://127.0.0.1:8080` |
 | `cleanup_ui_check.mjs <url>` | 验证性能页「显存清理」卡与「模型专属参数」卡的 9 个字段。 |
+| `cleanup_probe.mjs [--inject]` | **性能页三处改动的验收探针**：① 预演按钮是否在「加载后预测显存占用」卡内；② 空闲下拉是否已自绘（无原生 `<select>`、箭头 rotate 随展开变化、面板圆角）；③ 清理卡是否**不给「别的程序的进程」卸载入口**。`--inject` 拦截 `/api/gpu-cleanup` 注入「新版 manager」载荷 → 同时验证过渡期降级与正式行为。<br>⚠️ 读箭头要读 CSS `rotate`（Tailwind v4 不用 `transform`）；找面板要按 `[role=menu]` 找，别按文本猜。 |
+| `idle_dropdown_probe.mjs` | **「空闲卸载」下拉定点诊断**：触发器 class/`data-state`、箭头 `rotate`、弹出面板真实圆角/背景/层级链。怀疑「下拉 UI 还是系统组件」时先跑它。 |
 | `mock_webui_server.py` | 没有后端时起一个假 `:8080`，用来单独验 UI（静态目录写死 `D:\llama\webui`）。 |
 | `start_for_ui.py` | 起一个测试用模型实例（给 UI 验证提供数据源），用完自动空闲卸载。 |
 
@@ -82,6 +84,7 @@ node tools/ui/ui_probe.mjs http://127.0.0.1:8080
 | `fit_probe.py` | 免重启跑显存预测（`fit_plan`）的探针，只读预演。 |
 | `metrics_bench.py <model.gguf> <port> <ctx>` | 量 `/api/system-metrics` 的响应耗时（当年 2366ms → <5ms 的验证工具）。 |
 | `cleanup_probe.py` | 免重启跑一遍显存清理的**只读**盘点逻辑（列出所有 llama-server 进程并分类）。 |
+| `../diag/verify_gpu_cleanup_kinds.py` | **分类逻辑单测**（离线、6 个伪造进程 + 真实踩坑场景）：`exe` 路径匹配 **且**命令行带我们的 `-a/--alias` 才算 `orphan`，否则一律 `foreign`。改分类规则后必跑。 |
 | `fit_compare.mjs <abs.gguf> [k=v,...]` | **对比不同启动参数下的上卡层数与显存账本**（调 manager `/api/fit`，只读、不起实例）。模型路径必须**绝对路径**。不给参数时跑内置对照组（f16/q8_0/q4_0 KV × batch × 上下文），用来定位"为什么掉层"。 |
 | `gguf_info.py <a.gguf> [...]` | 读 GGUF 头部：架构、层数、头数、KV 维度、量化类型、训练上下文。 |
 | `gguf_kvscan.py <a.gguf> [...]` | 只打印注意力 / 滑动窗口 / SSM 相关元数据键，用于判断 KV 架构与精确算 KV 体积。 |
@@ -113,6 +116,7 @@ node tools/ui/ui_probe.mjs http://127.0.0.1:8080
 | 脚本 | 用途 |
 |---|---|
 | `clear_webview_cache.js <目录名> [--apply]` | 清 WebView2 的**纯缓存**目录（白名单：`Cache` / `Code Cache` / `GPUCache` / `Dawn*` / `Service Worker/CacheStorage` / `ScriptCache`）。<br>**不动** `Local Storage` / `IndexedDB` —— 那里存着语言设置与方案。<br>应用必须**先关掉**。 |
+| `append_file.mjs <目标文件> <片段文件>` | **安全追加**：本沙箱里 `cat >> 文件 << EOF` 会**覆盖文件头部**（见文末纪律 3），所以往记忆/日志/文档追加内容一律走它。片段先用编辑器工具写成 UTF-8 文件再传进来；`--check` 只看行数/字节数。字节数没增长会以 exit 1 报警。 |
 | `prune_backups.js [--keep N] [--limit M] [--apply]` | `rollback\` 里 `webui-built-*` 的轮转，默认保留最近 3 份。不带 `--apply` 是干跑。`deploy.ps1` 已内置同样的轮转。<br>⚠️ 按**目录名**排序而不是 mtime（见文末纪律 2）。 |
 
 ---
@@ -125,6 +129,9 @@ node tools/ui/ui_probe.mjs http://127.0.0.1:8080
 | `diag\diag.ps1` | 主控：环境快照 → 带 CDP 调试端口重启外壳 → 每 0.5s 记录启动时间线 + 定时窗口截图 → 调 CDP 采集器 → 扫 localStorage → 汇总 `report.txt`。 |
 | `diag\diag_cdp.mjs` | 零依赖 CDP 采集器（Node 自带 `fetch`/`WebSocket`）：DOM 中英文节点数、属性漏翻、控制台 error/warning、逐资源 HTTP 状态/字节/缓存、页面截图、语言切换自检。 |
 | `diag\diag_ls.mjs` | localStorage 取证器：直接二进制扫 leveldb，即使 CDP 连不上也能读出「overlay 脚本跑没跑、语言是什么、方案还在不在」。 |
+| `diag\probe_procs_gpu.py` | 把 `manager.py` 里那段「进程 + 按进程显存」的 PowerShell 探针**原样跑一遍并打印完整命令行**。界面上一行「无人管理」到底是什么进程、为什么被判成 foreign，跑它。<br>只读，不起服务、不杀进程。 |
+| `diag\list_native_selects.mjs [url]` | 列出页面上还剩哪些**原生 `<select>`**（正常输出 `[]`）。原生 select 的弹出层是系统直角菜单、箭头不随展开变化 —— 性能页三处下拉已全部自绘，用它兜底复查。 |
+| `diag\list_bad_responses.mjs [url]` | 列出页面加载时所有 **≥400 的响应**。哨兵模式下稳定出现 `400 /slots`、`403 /tools`，属预期。 |
 
 跑一次约 60~90 秒，产物落在 `D:\llama\diag\<时间戳>\`（**注意：`diag\` 是报告输出目录，
 `tools\diag\` 才是脚本目录**，两者同名不同用途）。
@@ -175,4 +182,7 @@ D:\llama\tools\diag\diag.bat
    所以 `prune_backups.js` 按**目录名**排序而不是 mtime（名字里带时间戳，天然有序）。
 3. **写文件别用 shell 的 `>>` / `>` / `sed -i`**。本沙箱里 `cat >> 文件 << EOF` 会变成
    **覆盖文件开头**而不是追加（实测把记忆文件的头部 1.3KB 抹掉，字节数还不变，极难发现）。
-   要改已有文件请用编辑器工具，或写 `.js`/`.py` 脚本走 `fs.writeFileSync`。
+   要改已有文件请用编辑器工具，或写 `.js`/`.py` 脚本走 `fs.writeFileSync`；
+   追加用 **`node tools/ops/append_file.mjs <目标文件> <片段文件>`**。
+   **已中招的抢救**：跟踪文件 `git checkout HEAD -- <文件>` 可完整还原（零丢失）；
+   未入库的文件只能靠翻会话记录 —— 所以追加前先确认它在 git 里。

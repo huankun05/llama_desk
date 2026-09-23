@@ -25,6 +25,7 @@
 	} from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
+	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import { API_SLOTS, APP_NAME, ROUTES, SETTINGS_KEYS } from '$lib/constants';
 	import { ManagerError, ManagerService } from '$lib/services';
 	import type {
@@ -159,6 +160,20 @@
 	// 启动下发给 manager（0 = 常驻不卸载），存 localStorage 作为本机偏好。
 	const LS_TTL = 'webui.idleTtl';
 	let idleTtl = $state(300);
+
+	// 空闲 TTL 的选项与当前显示文案。
+	// ⚠️ 文案必须是 overlay 词表里已有的整节点文本（'5 min' / '15 min' / '30 min' / 'never'），
+	// 否则界面会退回英文 —— 这里的 label 同时用于触发器和下拉项两处。
+	const IDLE_TTL_OPTIONS = [
+		{ value: '300', label: '5 min' },
+		{ value: '900', label: '15 min' },
+		{ value: '1800', label: '30 min' },
+		{ value: '0', label: 'never' }
+	];
+	/** 配置文件里存了非标准值（老版本/手工改过）时兜底显示 `Ns`，不让下拉变空白 */
+	const idleTtlLabel = $derived(
+		IDLE_TTL_OPTIONS.find((o) => o.value === String(idleTtl))?.label ?? `${idleTtl}s`
+	);
 
 	function loadTtl() {
 		try {
@@ -1045,6 +1060,17 @@
 	/** 结构化结果（不放整句英文 —— overlay 只翻「整文本节点精确匹配」的静态串） */
 	let cleanupDone = $state<{ stopped: number; freed: number | null; reason: string } | null>(null);
 
+	/**
+	 * 管理器是否已经能**分清「本应用的残留」和「别的程序的进程」**。
+	 *
+	 * `own_exe` 是新版 manager 才回的新字段。旧 manager 只按映像名 `llama-server.exe` 判断，
+	 * 会把别的程序（实测：用户自己的 OCR 项目用**我们这份 exe** 起的 Hy-MT2-1.8B 翻译实例）
+	 * 判成 orphan 并允许「一键清理」—— 点一下就把别人的模型杀了。
+	 * ⇒ 过渡期**不信任**清理动作：照样列出来，但不给卸载入口、不显示一键清理按钮。
+	 * （和 B-L1 徽章用 `full_attention_interval` 键存在性区分新旧 manager 是同一个套路。）
+	 */
+	const cleanupTrusted = $derived(cleanupReport?.own_exe != null);
+
 	async function loadCleanup() {
 		cleanupLoading = true;
 		cleanupError = '';
@@ -1444,6 +1470,10 @@
 							shows up in the instance list - and it keeps holding VRAM until you stop it
 							here.
 						</span>
+						<span>
+							Processes started by another app (Ollama, Docker, ...) are listed too, but
+							this panel never stops them.
+						</span>
 					</p>
 					{#if cleanupReport?.gpu.used_mib != null}
 						<span class="ml-auto whitespace-nowrap font-mono text-xs text-muted-foreground">
@@ -1468,6 +1498,13 @@
 					{:else}
 						<ul class="mt-3 flex flex-col gap-2">
 							{#each cleanupReport.processes as p (p.pid)}
+								<!--
+									isForeign = 明确是别的程序的进程，**或者**当前管理器还没能力区分
+									（旧 manager：exe/启动参数一概不看，`own_exe` 字段也不存在）
+									→ 只要不是"能确认是我们自己的残留"，一律当别的程序处理、不给卸载入口。
+								-->
+								{@const isForeign =
+									p.kind === 'foreign' || (p.kind === 'orphan' && !cleanupTrusted)}
 								<li
 									class="flex flex-wrap items-center gap-2 rounded-md border border-border/60 px-2 py-1.5 text-xs"
 								>
@@ -1489,20 +1526,46 @@
 										<span class="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-500">
 											<span>in use</span>
 										</span>
+									{:else if isForeign}
+										<!--
+											**别的程序**在用的 llama-server。两种都算：
+											① 别的程序装的那份 exe（本机实测：Ollama 的模型 runner、
+											   Docker Desktop 的 Model Runner）；
+											② 别人拿着我们这份 exe 起的（本机实测：用户自己的 OCR 项目
+											   用 --model … Hy-MT2-1.8B … --jinja 起的翻译实例）。
+											**一律不给卸载入口** —— 要卸应该去那个程序里卸，本面板不替他做决定。
+										-->
+										<span
+											class="rounded bg-sky-500/15 px-1.5 py-0.5 text-sky-600 dark:text-sky-400"
+											title={p.exe ?? ''}
+										>
+											<span>other app</span>
+										</span>
+										{#if p.source}
+											<span class="rounded border border-border px-1 font-mono text-muted-foreground"
+												>{p.source}</span
+											>
+										{/if}
 									{:else}
 										<span class="rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-500">
 											<span>unmanaged</span>
 										</span>
 									{/if}
-									<button
-										class="ml-auto rounded-md border border-border px-2 py-0.5 text-muted-foreground hover:bg-accent disabled:opacity-50"
-										disabled={cleanupBusy}
-										onclick={() => unloadPid(p.pid)}
-										title="Stop this process and release its VRAM"
-										type="button"
-									>
-										<span>Unload</span>
-									</button>
+									{#if isForeign}
+										<span class="ml-auto text-[11px] text-muted-foreground">
+											<span>started by another app - unload it there</span>
+										</span>
+									{:else}
+										<button
+											class="ml-auto rounded-md border border-border px-2 py-0.5 text-muted-foreground hover:bg-accent disabled:opacity-50"
+											disabled={cleanupBusy}
+											onclick={() => unloadPid(p.pid)}
+											title="Stop this process and release its VRAM"
+											type="button"
+										>
+											<span>Unload</span>
+										</button>
+									{/if}
 								</li>
 							{/each}
 						</ul>
@@ -1518,7 +1581,7 @@
 							<RefreshCw class="h-3 w-3" />
 							<span>Rescan</span>
 						</button>
-						{#if cleanupReport.orphans.length > 0}
+						{#if cleanupReport.orphans.length > 0 && cleanupTrusted}
 							<button
 								class="inline-flex items-center gap-1 rounded-md border border-red-500/40 px-2 py-1 text-xs text-red-500 hover:bg-red-500/10 disabled:opacity-50"
 								disabled={cleanupBusy}
@@ -1529,11 +1592,21 @@
 								<span>Clean up unmanaged</span>
 								<span class="font-mono">{num(cleanupReport.reclaimable_mib, ' MiB')}</span>
 							</button>
+						{:else if !cleanupTrusted}
+							<!-- 过渡期：旧 manager 分不清"本应用的残留"和"别的程序用我们 exe 起的实例"，
+							     宁可先不给清理入口，也别让用户一键把别的程序的模型杀掉 -->
+							<span class="text-[11px] text-amber-600 dark:text-amber-500">
+								<span>
+									Restart the app to enable cleanup: the running manager cannot tell other
+									programs apart.
+								</span>
+							</span>
 						{/if}
 						<span class="text-[11px] text-muted-foreground" style="max-width: 34rem">
 							<span>
-								The cleanup button stops only processes the manager does not know about
-								and that are not listening on the active port.
+								The cleanup button stops only leftovers of this app: the same llama-server.exe,
+								not in the instance list and not listening on the active port. Processes started
+								by other apps are never touched.
 							</span>
 						</span>
 					</div>
@@ -2120,8 +2193,9 @@
 
 			{#if !collapsed.setup}
 			<!--
-				空闲卸载 + 显存预演：这两件事都回答同一个问题"这个模型在本卡上跑得动吗、要一直占着显存吗"。
-				空闲卸载参考 Ollama 的 KEEP_ALIVE / LM Studio 的 Idle TTL；预演则调用 llama-fit-params。
+				空闲卸载：参考 Ollama 的 KEEP_ALIVE / LM Studio 的 Idle TTL。
+				（"这个模型跑得动吗"的显存预演按钮已经移到右侧「加载后预测显存占用」卡片里，
+				  紧挨着它产出的数字，不再孤零零挂在最上面一条。）
 			-->
 			<div
 				class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-border bg-card p-3 text-xs"
@@ -2130,65 +2204,42 @@
 					<Clock class="h-3.5 w-3.5" />
 					<span>Unload when idle for</span>
 				</span>
-				<select
-					class="rounded-md border border-border bg-background px-2 py-1 font-mono text-xs"
-					onchange={(e: Event) => setIdleTtl(Number((e.currentTarget as HTMLSelectElement).value))}
-					value={String(idleTtl)}
-				>
-					<option value="300">5 min</option>
-					<option value="900">15 min</option>
-					<option value="1800">30 min</option>
-					<option value="0">never</option>
-				</select>
+				<!--
+					自绘下拉，**不用原生 <select>**：原生弹出层是系统组件、直角，箭头在展开/收起时
+					毫无变化、还容易压到文字。这里用项目里「模型下拉」同一套 DropdownMenu：
+					触发器自己排版（右侧预留间距 + 箭头不与文字重叠），
+					箭头靠 trigger 上的 `group` + `data-[state=open]` 旋转，
+					弹出面板是 `rounded-md border bg-popover shadow-md`（圆角、跟随主题）。
+				-->
+				<DropdownMenu.Root>
+					<DropdownMenu.Trigger
+						class="group inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-border bg-background pr-1.5 pl-2 font-mono text-xs text-foreground transition-colors hover:border-primary/40 data-[state=open]:border-primary/60"
+					>
+						<span>{idleTtlLabel}</span>
+						<ChevronDown
+							class="size-3 shrink-0 opacity-60 transition-transform duration-200 group-data-[state=open]:-rotate-180"
+						/>
+					</DropdownMenu.Trigger>
+					<DropdownMenu.Content align="start" class="min-w-[7rem]">
+						<DropdownMenu.RadioGroup
+							onValueChange={(v) => setIdleTtl(Number(v))}
+							value={String(idleTtl)}
+						>
+							{#each IDLE_TTL_OPTIONS as o (o.value)}
+								<DropdownMenu.RadioItem
+									class="py-1 font-mono text-xs"
+									value={o.value}
+								>
+									{o.label}
+								</DropdownMenu.RadioItem>
+							{/each}
+						</DropdownMenu.RadioGroup>
+					</DropdownMenu.Content>
+				</DropdownMenu.Root>
 				<span class="text-muted-foreground">
 					<span>frees VRAM while the model sits unused</span>
 				</span>
-
-				<button
-					class="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs transition-colors hover:border-primary/50 hover:text-primary disabled:opacity-50"
-					disabled={preflightBusy}
-					onclick={runPreflight}
-					type="button"
-				>
-					<Gauge class="h-3.5 w-3.5" />
-					<span>{preflightBusy ? 'Running…' : 'Preflight VRAM'}</span>
-				</button>
 			</div>
-
-			{#if preflight && (!targetModel || preflightFor === targetModel.path)}
-				<div
-					class="mb-4 rounded-lg border border-border bg-card p-3 text-xs text-muted-foreground"
-					title="Runs llama-fit-params to see how this model fits your card"
-				>
-					<span class="font-medium text-foreground">Preflight</span>
-					<span>· {preflight.note}</span>
-					{#if preflight.n_layer}
-						<span>· GPU layers</span>
-						<span class="font-mono">{layersText(preflight)}/{preflight.n_layer}</span>
-					{/if}
-					{#if preflight.ok && preflight.applied_ctx !== preflight.requested_ctx}
-						<span>· suggest ctx</span>
-						<span class="font-mono text-amber-600 dark:text-amber-500"
-							>{preflight.applied_ctx.toLocaleString()}</span
-						>
-					{/if}
-					{#if preflight.auto_tier}
-						<!-- 自适应降档：真正下发的档位可能和预设不同，必须显式告诉用户 -->
-						<span>
-							· <span class="text-amber-600 dark:text-amber-500">auto-tuned</span>
-							KV <span class="font-mono">{preflight.applied_ctk}</span>
-							· batch <span class="font-mono"
-								>{preflight.applied_batch}/{preflight.applied_ubatch}</span
-							>
-							{#if preflight.applied_ctx !== preflight.requested_ctx}
-								· ctx <span class="font-mono"
-									>{preflight.applied_ctx.toLocaleString()}</span
-								>
-							{/if}
-						</span>
-					{/if}
-				</div>
-			{/if}
 
 			<div class="grid gap-6 lg:grid-cols-2">
 				<!-- 左：方案 + 该模型专属参数 -->
@@ -2205,24 +2256,45 @@
 					</div>
 
 					<div class="flex items-center gap-2">
-						<select
-							class="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
-							onchange={(e: Event) => doSelectPreset((e.currentTarget as HTMLSelectElement).value)}
-							value={targetActivePresetId}
-						>
-							<optgroup label="Global presets">
-								{#each launchPresetsStore.presets as p (p.id)}
-									<option value={p.id}>{p.name}</option>
-								{/each}
-							</optgroup>
-							{#if targetOwnPresets.length > 0}
-								<optgroup label="Saved for this model">
-									{#each targetOwnPresets as p (p.id)}
-										<option value={p.id}>{p.name}</option>
-									{/each}
-								</optgroup>
-							{/if}
-						</select>
+						<!--
+							同样是自绘下拉（原生 <select> 的弹出层是系统直角菜单、箭头不随展开变化）。
+							分组用 DropdownMenu.Group + GroupHeading 还原原来的 <optgroup>。
+						-->
+						<DropdownMenu.Root>
+							<DropdownMenu.Trigger
+								class="group inline-flex h-8 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-1 font-mono text-sm text-foreground transition-colors hover:border-primary/40 data-[state=open]:border-primary/60"
+							>
+								<span class="truncate">{launchPresetsStore.presetNameFor(targetModel)}</span>
+								<ChevronDown
+									class="size-3.5 shrink-0 opacity-60 transition-transform duration-200 group-data-[state=open]:-rotate-180"
+								/>
+							</DropdownMenu.Trigger>
+							<DropdownMenu.Content align="start" class="max-w-[18rem] min-w-[12rem]">
+								<DropdownMenu.RadioGroup
+									onValueChange={(v) => doSelectPreset(v)}
+									value={targetActivePresetId}
+								>
+									<DropdownMenu.Group>
+										<DropdownMenu.GroupHeading>Global presets</DropdownMenu.GroupHeading>
+										{#each launchPresetsStore.presets as p (p.id)}
+											<DropdownMenu.RadioItem class="text-xs" value={p.id}>
+												{p.name}
+											</DropdownMenu.RadioItem>
+										{/each}
+									</DropdownMenu.Group>
+									{#if targetOwnPresets.length > 0}
+										<DropdownMenu.Group>
+											<DropdownMenu.GroupHeading>Saved for this model</DropdownMenu.GroupHeading>
+											{#each targetOwnPresets as p (p.id)}
+												<DropdownMenu.RadioItem class="text-xs" value={p.id}>
+													{p.name}
+												</DropdownMenu.RadioItem>
+											{/each}
+										</DropdownMenu.Group>
+									{/if}
+								</DropdownMenu.RadioGroup>
+							</DropdownMenu.Content>
+						</DropdownMenu.Root>
 						<button
 							class="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent"
 							onclick={openSavePreset}
@@ -2377,16 +2449,29 @@
 
 							<label class="flex flex-col gap-1">
 								<span class="text-xs text-muted-foreground">KV precision</span>
-								<select
-									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
-									onchange={(e: Event) =>
-										setModelCtk(m, (e.currentTarget as HTMLSelectElement).value)}
-									value={cfg.ctk}
-								>
-									<option value="f16">f16</option>
-									<option value="q8_0">q8_0</option>
-									<option value="q4_0">q4_0</option>
-								</select>
+								<!-- 自绘下拉（同空闲卸载）：原生 select 的系统弹出层是直角、不跟主题 -->
+								<DropdownMenu.Root>
+									<DropdownMenu.Trigger
+										class="group inline-flex h-8 items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-1 font-mono text-sm text-foreground transition-colors hover:border-primary/40 data-[state=open]:border-primary/60"
+									>
+										<span>{cfg.ctk}</span>
+										<ChevronDown
+											class="size-3.5 shrink-0 opacity-60 transition-transform duration-200 group-data-[state=open]:-rotate-180"
+										/>
+									</DropdownMenu.Trigger>
+									<DropdownMenu.Content align="start" class="min-w-[7rem]">
+										<DropdownMenu.RadioGroup
+											onValueChange={(v) => setModelCtk(m, v)}
+											value={cfg.ctk}
+										>
+											{#each ['f16', 'q8_0', 'q4_0'] as q (q)}
+												<DropdownMenu.RadioItem class="py-1 font-mono text-xs" value={q}>
+													{q}
+												</DropdownMenu.RadioItem>
+											{/each}
+										</DropdownMenu.RadioGroup>
+									</DropdownMenu.Content>
+								</DropdownMenu.Root>
 							</label>
 
 							<label class="flex flex-col gap-1">
@@ -2510,10 +2595,57 @@
 				<!-- 右：预测（跟着左边实时变） -->
 				{#if showPredicted}
 					<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
-						<div class="mb-3 flex items-center gap-2">
+						<div class="mb-3 flex flex-wrap items-center gap-2">
 							<Activity class="h-4 w-4 text-primary" />
 							<h3 class="text-sm font-semibold">Predicted VRAM After Load</h3>
+							<!--
+								「预演显存占用」原来挂在页面最上面的空闲卸载横条里，离它产出的数字太远，
+								而且和"空闲卸载"根本不是一回事。移到这里：左边是估算，右边一键拿
+								llama.cpp 自己的权威账本，结论与估算并排对照。
+							-->
+							<button
+								class="ml-auto inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs transition-colors hover:border-primary/50 hover:text-primary disabled:opacity-50"
+								disabled={preflightBusy}
+								onclick={runPreflight}
+								title="Runs llama-fit-params to see how this model fits your card"
+								type="button"
+							>
+								<Gauge class="h-3.5 w-3.5" />
+								<span>{preflightBusy ? 'Running…' : 'Preflight VRAM'}</span>
+							</button>
 						</div>
+
+						{#if preflight && (!targetModel || preflightFor === targetModel.path)}
+							<div class="mb-3 rounded-md border border-border/60 bg-muted/40 p-2 text-xs text-muted-foreground">
+								<span class="font-medium text-foreground">Preflight</span>
+								<span>· {preflight.note}</span>
+								{#if preflight.n_layer}
+									<span>· GPU layers</span>
+									<span class="font-mono">{layersText(preflight)}/{preflight.n_layer}</span>
+								{/if}
+								{#if preflight.ok && preflight.applied_ctx !== preflight.requested_ctx}
+									<span>· suggest ctx</span>
+									<span class="font-mono text-amber-600 dark:text-amber-500"
+										>{preflight.applied_ctx.toLocaleString()}</span
+									>
+								{/if}
+								{#if preflight.auto_tier}
+									<!-- 自适应降档：真正下发的档位可能和预设不同，必须显式告诉用户 -->
+									<span>
+										· <span class="text-amber-600 dark:text-amber-500">auto-tuned</span>
+										KV <span class="font-mono">{preflight.applied_ctk}</span>
+										· batch <span class="font-mono"
+											>{preflight.applied_batch}/{preflight.applied_ubatch}</span
+										>
+										{#if preflight.applied_ctx !== preflight.requested_ctx}
+											· ctx <span class="font-mono"
+												>{preflight.applied_ctx.toLocaleString()}</span
+											>
+										{/if}
+									</span>
+								{/if}
+							</div>
+						{/if}
 
 						{#if !estimate}
 							<p class="text-sm text-muted-foreground">No model selected.</p>

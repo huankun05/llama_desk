@@ -22,6 +22,22 @@
 
 - `vite build` 清目录报 `EPERM` → 先 `node tools/build/clean_output.js <目录>`；
   **vite build 不做类型检查** → `npm run check` 或 `validate_svelte.mjs`。
+- ⚠️ **沙箱里的构建姿势（两个坑叠在一起，缺一步就卡死）**：
+  1. **不要跑 `npm run build`** —— 它是 `build-pwa-assets && vite build`，而
+     `pwa-assets-generator`（sharp + 无头浏览器）会**卡住**：实测 7 分钟零产物写入、
+     `dist` 都不生成。图标没改就不用重生成。
+  2. **必须先 `clean_output.js` 再 `vite build`** —— 让 vite 自己 `emptyOutDir` 也会**卡死**
+     （判据：`Get-Process -Id <vite pid>` 的 `CPU` 4 秒内**零增长**，进程活着但一点不干活）。
+  正确命令：
+  ```bash
+  cd /d/llama/ui-src/work
+  "E:/software/Nodejs/node.exe" "D:/llama/tools/build/clean_output.js" "D:/llama/ui-src/work/dist"
+  "E:/software/Nodejs/node.exe" "D:/llama/ui-src/work/node_modules/vite/bin/vite.js" build
+  ```
+  然后 `powershell -File D:\llama\ui-src\deploy.ps1`（**必须用 PowerShell 工具**，
+  从 Bash 里调 powershell 会被安全策略拒绝）。
+- ⚠️ 给 `node`/`git`/`python` 传路径**必须 Windows 风格** `E:/...`：MSYS 风格 `/e/...`
+  会被转成 `D:\e\...` 直接报 `Cannot find module`。
 - ⚠️ **`agent-browser` 在本沙箱导航失效**（`open` 报成功但 `location.href` 仍 `about:blank`）
   → 别用它验证 WebUI（见 `webui-cache-debug.md` §6 的替代方案）。
 - ⚠️ **连续删大量文件会被 SIGTERM 中断**，且**残留目录 mtime 反而最新**
