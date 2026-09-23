@@ -761,12 +761,29 @@ webui/manager_pkg/
 
 > 做完这批：**等待有解释、卸载有交代、徽章可信**。这是"体验提升"性价比最高的一批。
 
-> **进度（2026-09-23）：4（C）+ 5（D）已完成** —— 只改了 `manager.py` 与前端，没碰外壳。
+> **进度（2026-09-23）：4（C）+ 5（D）+ 6（B-L2）全部完成** —— 只改了 `manager.py` 与前端，没碰外壳。
 > 阶段锚点取 llama-server 自己的 stdout 日志（它没有进度 API），8 个锚点；
 > 起不来时 3 秒内出红条 + 真实原因；倒计时用 `idle_expires_at` 绝对时刻（不是 `ttl-idle` 快照）；
 > 常驻开关 `POST /api/instances/<id>/pin`；事件流 `/api/events?since=` 供卸载/降档各提示一次。
 > 验收：`tools/diag/verify_load_progress.py` 49/49、`tools/ui/probe_load_progress_ui.mjs` 18/18
-> （出图 `diag/shots-20260923-c/`）。**剩下第 6 项 B-L2 后台精确预演缓存未做。**
+> （出图 `diag/shots-20260923-c/`）。
+>
+> **B-L2 的落地方式与原计划有一处关键偏差**（原方案会白跑子进程，故改掉了）：
+> - 原计划「后台对最近使用/有启动方案的 N=8 个模型各跑一次预演」**行不通** ——
+>   启动方案存在**浏览器 localStorage**，manager 是纯后端、读不到，于是"按各自方案预热"
+>   既凑不准参数、又要白起 8 个 `llama-fit-params` 子进程。
+> - 改成：**只补"上次使用的那个模型"**，且用**它上次实际下发的参数**
+>   （`start_instance` 顺手把 `applied_*` 记进 `app/last-model.json`）。
+>   命中率最高、成本最低 —— 它就是打开应用第一眼要看的那个。
+> - 三条"不许拖慢"的铁律：不在 `/api/models` 里现跑预演、不在 `start_instance` 里多跑一次、
+>   只在**没有任何实例在跑**时由后台线程补测（90s 一探，命中即空转）。
+> - 缓存 `app/fit-cache.json`，键 `path|ctk`（与前端 `kvCacheStore` 同形），
+>   用**文件大小 + mtime_ns** 做失效判定，7 天 TTL，超 64 条淘汰最旧。
+> - 前端只加了一个 `kvCacheStore.ingest(models)`：把 `/api/models` 带回来的现成结论收进本地缓存，
+>   于是徽章**零子进程**地从"结构估算"变"实测"，并多出一枚 `measured` 标记。
+> 验收：`tools/diag/verify_fit_cache.py` 21/21、`tools/diag/verify_fit_prewarm_live.py` 10/10
+> （真的起一次 `llama-fit-params`，测出 12.594 KiB/token 并落盘）、
+> `tools/ui/probe_measured_badge.mjs`（出图 `diag/shots-20260923-bl2/`）。
 
 ### 第 2 批（2~3 天 · 把最后一个手动环节干掉）
 7. **A 应用内下载器**（先写 20 行探针验证 `Range` 在重定向后的行为，再动主体）

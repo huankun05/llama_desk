@@ -47,6 +47,29 @@
   污染成降档后的值。
 - ⚠️ 量 KV 时调 `/api/fit` **必须带 `auto_ladder:false`**，否则量到的是降档后的精度。
 
+### 4.1 自动通路（B-L2，2026-09-23）：不点按钮也会变实测
+
+**两条入口共用同一份缓存**，`record()` 与 `ingest()` 都写 `webui.kvMeasured`：
+
+| 入口 | 触发 | 成本 |
+|---|---|---|
+| 手动 | 用户点「Predict VRAM」→ `kvCacheStore.measure()` → `/api/fit` | 起一次子进程 |
+| **自动** | manager 空闲时补测 → `/api/models` 带 `kv_measured` → `kvCacheStore.ingest(models)` | **零子进程**（读现成结论） |
+
+- manager 侧：`app/fit-cache.json`，键 `路径\|精度`（**与前端同形**），存 `per_token_kb`。
+  用**文件大小 + mtime_ns** 判失效，7 天 TTL，超 64 条淘汰最旧。
+- ⚠️ **三条"不许拖慢"铁律**：① 不在 `/api/models` 里现跑预演（会卡首屏）；
+  ② 不在 `start_instance` 里多跑一次（加载已经够慢）；③ 只在**没有任何实例在跑**时
+  由后台线程（90s 一探）补测 —— 预演会起 llama.cpp 上下文，跟正在跑的模型抢显存。
+- ⚠️ 后台只补**「上次使用的模型」**，用 `app/last-model.json` 里记的**实际下发参数**
+  （`applied_ctk`）。原计划"给 N 个模型各按自己的方案预热"**行不通**：启动方案在浏览器
+  localStorage，manager 是纯后端读不到，硬做只会白起子进程还算错档位。
+- ⚠️ `ingest()` **只补还没有的键** —— 性能页那次手动预演更贴近真实参数，不该被通用账本盖掉。
+- ⚠️ 挑样本/排查时注意：**BERT 系（nomic-embed / bge）GGUF 头部照样报 `n_head_kv`**，
+  但推理时根本不分配 KV cache，`fit_mem` 给不出 `per_token_kb` —— 看到"没数据"先确认是不是
+  挑到了 embed 模型，而不是以为功能坏了。
+- 徽章上多一枚 `measured`（→实测）标记，用来区分"量出来的"与"算出来的"。
+
 ## 5. 三色档位
 
 `fitLevel(totalGb, budgetGb)`：`full` ≤ 85% 预算 / `tight` ≤ 100% / 超过则 `over`。

@@ -214,6 +214,9 @@ import { onMount } from 'svelte';
 
 		try {
 			models = await ManagerService.listModels();
+			// 收下 manager 后台补测的实测 KV（若有）—— 这一步之后徽章就从"结构估算"
+			// 变成"llama.cpp 实测"，且**一个子进程都不用起**（账本是现成的）。
+			kvCacheStore.ingest(models);
 			loadError = '';
 		} catch (e: unknown) {
 			loadError = e instanceof Error ? e.message : String(e);
@@ -595,6 +598,20 @@ import { onMount } from 'svelte';
 													title={fitBadgeDetail(fit)}
 												>
 													{fit.summary}
+												</span>
+											{/if}
+											<!--
+												「这个数字是量出来的，不是算出来的」（B-L2）。
+												manager 空闲时用 llama-fit-params 补测过 KV 并落盘，前端只是
+												把现成结论收进来 —— 有这枚标记就说明徽章里的 KV/总量是实测值；
+												没有则是结构公式估算（滑窗/线性注意力架构上可能偏得离谱）。
+											-->
+											{#if fit?.confidence === 'measured'}
+												<span
+													class="shrink-0 rounded-sm bg-violet-500/15 px-1 py-px text-[10px] font-medium text-violet-500"
+													title="KV size measured by llama.cpp, not a structural estimate"
+												>
+													measured
 												</span>
 											{/if}
 											{#if m.mmproj}

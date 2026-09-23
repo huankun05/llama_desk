@@ -798,6 +798,8 @@
 		try {
 			const [a, b] = await Promise.all([ManagerService.listModels(), ManagerService.listInstances()]);
 			availModels = dedupeModels(a);
+			// 收下 manager 后台补测的实测 KV，徽章与预测显存随之从估算变实测
+			kvCacheStore.ingest(a);
 			instances = b;
 			modelErr = '';
 			managerStale = false;

@@ -21,10 +21,11 @@ export enum ScrollCarouselVariant {
 
 /**
  * Sidebar icon strip actions handled directly by the sidebar.
+ * (Settings used to live here too; it is now a plain `#/settings` route, so it
+ * needs no special-casing — it just goes through the generic `route` branch.)
  */
 export enum SidebarAction {
-	NEW_CHAT = 'new-chat',
-	SETTINGS = 'settings'
+	NEW_CHAT = 'new-chat'
 }
 
 /**

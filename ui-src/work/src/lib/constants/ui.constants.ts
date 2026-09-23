@@ -73,8 +73,8 @@ export const SIDEBAR_ACTIONS_ITEMS: DesktopIconStripItem[] = [
 		tooltip: 'Parameters'
 	},
 	{
-		action: SidebarAction.SETTINGS,
 		icon: Settings,
+		route: ROUTES.SETTINGS,
 		tooltip: 'Settings'
 	}
 ];

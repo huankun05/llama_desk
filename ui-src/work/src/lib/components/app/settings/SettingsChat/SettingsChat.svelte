@@ -23,13 +23,16 @@
 	import type { SettingsSection, SettingsSectionTitle } from '$lib/types';
 	import { setMode } from 'mode-watcher';
 	import { fade } from 'svelte/transition';
+	import { toast } from 'svelte-sonner';
+
+	// 设置现在是独立页面，不再有"关闭浮窗"这个动作。
+	// 原先保存成功是靠 onClose 关掉浮窗来当反馈的，页面化之后必须显式给一次提示，
+	// 否则点 Save 会像什么都没发生。
 	interface Props {
 		initialSection?: string;
-		onSectionChange?: (section: SettingsSectionTitle) => void;
-		onClose?: () => void;
 	}
 
-	let { initialSection, onClose, onSectionChange }: Props = $props();
+	let { initialSection }: Props = $props();
 
 	let activeSlug = $derived(initialSection ?? 'general');
 
@@ -39,8 +42,6 @@
 		if (found) {
 			activeSlug = found.slug;
 		}
-
-		onSectionChange?.(section);
 	}
 
 	let currentSection = $derived(
@@ -101,7 +102,8 @@
 			try {
 				JSON.parse(localConfig.customJson);
 			} catch (error) {
-				alert('Invalid JSON in custom parameters. Please check the format and try again.');
+				toast.error('Invalid JSON in custom parameters. Please check the format and try again.');
+
 				console.error(error);
 
 				return;
@@ -127,7 +129,7 @@
 						processedConfig[field] = numValue;
 					}
 				} else {
-					alert(`Invalid numeric value for ${field}. Please enter a valid number.`);
+					toast.error(`Invalid numeric value for ${field}. Please enter a valid number.`);
 
 					return;
 				}
@@ -135,7 +137,7 @@
 		}
 
 		settingsStore.updateMultipleConfig(processedConfig);
-		onClose?.();
+		toast.success('Settings saved');
 	}
 
 	export function reset() {

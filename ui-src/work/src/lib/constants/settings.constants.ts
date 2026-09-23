@@ -669,13 +669,6 @@ export const SETTINGS_REGISTRY: SettingsSectionEntry[] = [
 		settings: [
 			{
 				defaultValue: true,
-				help: 'Show the floating generation-speed bar in the corner while the model is responding.',
-				key: SETTINGS_KEYS.PERF_SHOW_FLOATING_BAR,
-				label: 'Show floating performance bar',
-				type: SettingsFieldType.CHECKBOX
-			},
-			{
-				defaultValue: true,
 				help: 'Show live GPU utilization, VRAM used / total, temperature, and device name on the Performance page.',
 				key: SETTINGS_KEYS.PERF_SHOW_GPU_PANEL,
 				label: 'Show GPU panel',

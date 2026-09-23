@@ -73,6 +73,46 @@ export class KvCacheStore {
 	}
 
 	/**
+	 * 把 manager 后台补测好的实测值一次性收进来（B-L2）。
+	 *
+	 * 这是「徽章从估算变实测」的**主要通路**：manager 在空闲时跑过
+	 * `llama-fit-params` 并把 `per_token_kb` 落盘，`/api/models` 每条都带着它，
+	 * 前端拉到列表后走这里 —— 于是**一个子进程都不用起**，徽章就准了。
+	 *
+	 * ⚠️ 只补"还没有"的键：本地已有的值可能来自性能页那次更贴近真实参数的预演
+	 *    （比如带自适应降档后实际档位），不该被后台的通用账本盖掉。
+	 */
+	ingest(models: ManagerModel[] | null | undefined): number {
+		if (!browser || !Array.isArray(models)) return 0;
+
+		const add: Record<string, KvMeasuredEntry> = {};
+		const now = Date.now();
+
+		for (const m of models) {
+			const measured = m?.kv_measured;
+
+			if (!m?.path || !measured || typeof measured !== 'object') continue;
+
+			for (const [ctk, kb] of Object.entries(measured)) {
+				const key = KvCacheStore.key(m.path, ctk);
+
+				if (this.entries[key] || !(kb > 0)) continue;
+
+				add[key] = { at: now, perTokenKb: kb };
+			}
+		}
+
+		const n = Object.keys(add).length;
+
+		if (n > 0) {
+			this.entries = { ...this.entries, ...add };
+			this.persist();
+		}
+
+		return n;
+	}
+
+	/**
 	 * 直接登记一个实测值（性能页的「精确预演」走这条路）。
 	 *
 	 * ⚠️ 调用方必须传**实际生效**的 KV 精度（`preflight.applied_ctk`），不能传用户选的：

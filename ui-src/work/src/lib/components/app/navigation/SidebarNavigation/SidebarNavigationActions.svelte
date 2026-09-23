@@ -24,7 +24,6 @@
 		hasConversations?: boolean;
 		onSearchClick?: () => void;
 		onNewChat?: () => void;
-		onSettingsClick?: () => void;
 	}
 
 	let {
@@ -32,8 +31,7 @@
 		isExpandedMode = false,
 		hasConversations = false,
 		onNewChat,
-		onSearchClick,
-		onSettingsClick
+		onSearchClick
 	}: Props = $props();
 
 	let initialized = $state(false);
@@ -104,16 +102,14 @@
 							onNewChat?.();
 							void conversationsStore.openNewChat();
 						}
-					: item.action === SidebarAction.SETTINGS
-						? () => onSettingsClick?.()
-						: item.route
-							? () => {
-									onNewChat?.();
-									goto(item.route!);
-								}
-							: isSearchItem
-								? handleSearchClick
-								: undefined}
+					: item.route
+						? () => {
+								onNewChat?.();
+								goto(item.route!);
+							}
+						: isSearchItem
+							? handleSearchClick
+							: undefined}
 			{@const itemTransition = {
 				delay: !initialized ? i * ICON_STRIP_TRANSITION_DELAY_MULTIPLIER : 0,
 				duration: ICON_STRIP_TRANSITION_DURATION,
@@ -160,16 +156,14 @@
 							onNewChat?.();
 							void conversationsStore.openNewChat();
 						}
-					: item.action === SidebarAction.SETTINGS
-						? () => onSettingsClick?.()
-						: item.route
-							? () => {
-									onNewChat?.();
-									goto(item.route!);
-								}
-							: isSearchItem
-								? handleSearchClick
-								: undefined}
+					: item.route
+						? () => {
+								onNewChat?.();
+								goto(item.route!);
+							}
+						: isSearchItem
+							? handleSearchClick
+							: undefined}
 			{@const itemTransition = {
 				delay: !initialized ? i * ICON_STRIP_TRANSITION_DELAY_MULTIPLIER : 0,
 				duration: ICON_STRIP_TRANSITION_DURATION,

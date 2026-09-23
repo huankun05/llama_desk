@@ -718,6 +718,149 @@ def fit_mem(model_path, ctk=None, ctv=None, np_=None, fa=None, ctx=None,
     return mem
 
 
+# ---------- 精确预演缓存（B-L2）：让徽章从"结构估算"升级为"llama.cpp 实测" ----------
+# 三条铁律，都是为了**不拖慢任何东西**：
+#   ① 绝不在 /api/models 里现跑预演 —— 那要起子进程，模型列表首屏会卡住几百毫秒到几秒；
+#   ② 绝不在 start_instance 里额外跑一次 fit_mem —— 加载本来就慢，不能再加子进程；
+#   ③ 只在**没有任何实例在跑**时由后台线程补测，结果落盘长期复用。
+#
+# 缓存的是 `per_token_kb`（每 token 的 KV 字节数）。它是模型的**固有属性** ——
+# 只要 GGUF 文件没换、KV 精度没变，就一直成立，与当时卡上有多少东西无关。
+# 所以按 (模型路径, KV 精度) 存，用「文件大小 + mtime_ns」做失效判定
+# （与 parse_gguf_cached 同一套思路：文件换了这个账本就不再适用）。
+# key 的形状与前端 kvCacheStore 保持一致（`path|ctk`），前端拿到就能直接灌进缓存。
+FIT_CACHE_FILE = os.path.join(WEBUI_DIR, "..", "app", "fit-cache.json")
+FIT_CACHE_TTL = 7 * 24 * 3600.0     # 宽松 TTL：口径可能随 llama.cpp 版本变，别永久吃旧账
+FIT_CACHE_MAX = 64                  # 条目上限，避免长期使用后文件无限增长
+_fit_cache_lock = threading.Lock()
+
+
+def _stat_sig(path):
+    """文件指纹（大小 + mtime 纳秒）。任一变化就认为模型换了，旧账作废。"""
+    try:
+        st = os.stat(path)
+        return int(st.st_size), int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+    except OSError:
+        return None, None
+
+
+def _fit_cache_load():
+    try:
+        with open(FIT_CACHE_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if isinstance(d, dict) and isinstance(d.get("entries"), dict):
+            return d
+    except (OSError, ValueError):
+        pass
+    return {"entries": {}}
+
+
+_fit_cache = _fit_cache_load()
+
+
+def _fit_cache_flush():
+    """原子写盘。写失败一律吞掉 —— 缓存坏了不该影响任何功能。"""
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(FIT_CACHE_FILE)), exist_ok=True)
+        with _fit_cache_lock:
+            data = {"entries": dict(_fit_cache.get("entries") or {})}
+        tmp = FIT_CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, FIT_CACHE_FILE)   # 原子替换：绝不让人读到写了一半的文件
+    except OSError:
+        pass
+
+
+def fit_cache_put(model_path, ctk, per_token_kb, ctx=None):
+    """登记一条实测 KV。perTokenKb <= 0 直接丢弃（那是失败输出，不该污染缓存）。"""
+    if not model_path or not per_token_kb or per_token_kb <= 0:
+        return
+    size, mtime = _stat_sig(model_path)
+    key = "%s|%s" % (model_path, ctk or "f16")
+    with _fit_cache_lock:
+        ent = _fit_cache.setdefault("entries", {})
+        ent[key] = {"at": time.time(), "ctx": int(ctx or 0), "mtime_ns": mtime,
+                    "per_token_kb": round(float(per_token_kb), 5), "size": size}
+        if len(ent) > FIT_CACHE_MAX:
+            for k in sorted(ent, key=lambda k: ent[k].get("at") or 0)[:len(ent) - FIT_CACHE_MAX]:
+                ent.pop(k, None)
+    _fit_cache_flush()
+
+
+def fit_cache_get(model_path, ctk):
+    """取一条实测 KV；过期 / 文件已变 / 没测过都返回 None（调用方回退结构估算）。"""
+    if not model_path:
+        return None
+    with _fit_cache_lock:
+        hit = (_fit_cache.get("entries") or {}).get("%s|%s" % (model_path, ctk or "f16"))
+        hit = dict(hit) if isinstance(hit, dict) else None
+    if not hit:
+        return None
+    if time.time() - float(hit.get("at") or 0) > FIT_CACHE_TTL:
+        return None
+    size, mtime = _stat_sig(model_path)
+    if size is None or hit.get("size") != size or hit.get("mtime_ns") != mtime:
+        return None
+    return hit
+
+
+def fit_cache_for(model_path):
+    """该模型各 KV 精度的实测值 {ctk: perTokenKb}，直接挂到 /api/models 的条目上。"""
+    out = {}
+    for ctk in ("f16", "q8_0", "q4_0"):
+        hit = fit_cache_get(model_path, ctk)
+        if hit:
+            out[ctk] = hit["per_token_kb"]
+    return out
+
+
+# 后台补测的间隔。这个线程只在"没有任何实例在跑"时才干活，
+# 所以大间隔完全够用 —— 它的唯一任务是把"打开应用第一眼看到的那个模型"补准。
+FIT_PREWARM_INTERVAL = 90.0
+
+
+def _any_instance_running():
+    with inst_lock:
+        return any(v.get("status") in ("running", "starting") for v in instances.values())
+
+
+def _fit_prewarm_tick():
+    """
+    给「上次使用的模型」补一次实测 KV。
+
+    为什么只做一个模型（而不是路线图里写的 N 个）：manager **读不到前端的启动方案**
+    （那是 localStorage 里的东西，纯后端看不见），所以"给 N 个模型各按自己的方案预热"
+    在这里既凑不准参数、又会白起一堆子进程。而"上次用的那个"正是打开应用第一眼要看的
+    那一个 —— 命中率最高、成本最低。其余模型等用户真的加载它、或在性能页点预演时，
+    账本自然就补上了（`start_instance` 里会顺手记一笔）。
+    """
+    if _any_instance_running():
+        # 有模型在跑：预演会起 llama.cpp 上下文跟它抢显存/CPU，一律让路
+        return
+    lm = get_last_model()
+    path = (lm or {}).get("path")
+    if not path or not os.path.isfile(path):
+        return
+    ctk = ((lm or {}).get("params") or {}).get("ctk") or "f16"
+    if fit_cache_get(path, ctk):
+        return                      # 已有新鲜账本，不必再起子进程
+    mem = fit_mem(path, ctk=ctk, ctv=ctk, np_=1, fa=True, ctx=FIT_MEM_REF_CTX,
+                  batch=512, ubatch=128)
+    kb = (mem or {}).get("per_token_kb")
+    if kb:
+        fit_cache_put(path, ctk, kb, ctx=FIT_MEM_REF_CTX)
+
+
+def _fit_prewarm_loop():
+    while True:
+        time.sleep(FIT_PREWARM_INTERVAL)
+        try:
+            _fit_prewarm_tick()
+        except Exception:
+            pass
+
+
 def _scale_mem(mem, ctx):
     """把参考 ctx 的账本外推到目标 ctx，并补一个设备端总量。"""
     if not mem:
@@ -989,8 +1132,14 @@ def wait_port_free(port, timeout=6.0):
 LAST_MODEL_FILE = os.path.join(WEBUI_DIR, "..", "app", "last-model.json")
 
 
-def _remember_last_model(model_path, name=None):
-    """记下刚刚拉起的模型。写失败绝不能影响模型加载，一律吞掉。"""
+def _remember_last_model(model_path, name=None, params=None):
+    """
+    记下刚刚拉起的模型。写失败绝不能影响模型加载，一律吞掉。
+
+    `params` 是**实际下发**的启动参数（ctx / ctk / …，已是自适应降档之后的值）。
+    记它的唯一目的是给后台预热用：`fit_mem` 的账本依赖 KV 精度（q4_0 与 f16 差 4 倍），
+    按用户"请求值"去补测会存错档位。manager 读不到前端的方案配置，所以这里落一份。
+    """
     if not model_path:
         return
     try:
@@ -999,6 +1148,7 @@ def _remember_last_model(model_path, name=None):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"path": model_path,
                        "name": name or os.path.basename(model_path),
+                       "params": params or {},
                        "at": time.time()}, f, ensure_ascii=False)
         os.replace(tmp, LAST_MODEL_FILE)   # 原子替换：绝不让人读到写了一半的文件
     except OSError:
@@ -1130,7 +1280,12 @@ def start_instance(model_path, name, port, ctx, ctk='', ctv='', ngl=99,
         }
     # 记下「上一次使用的模型」：外壳以零模型哨兵启动时，界面就靠这份记录显示
     # 「上次使用 · 未加载」，并在首次对话时把同一个模型按需拉起来。
-    _remember_last_model(model_path, name)
+    # 连**实际下发**的参数一起记：后台补测实测 KV 时要按这个档位算（降档后
+    # 的 q4_0 与用户请求的 f16，KV 差 4 倍，按请求值补测会存错键）。
+    _remember_last_model(model_path, name,
+                         params={"batch": batch, "ctk": ctk, "ctv": ctv,
+                                 "ctx": ctx, "fa": flash_attn, "np": np_,
+                                 "ubatch": ubatch})
 
     # 自适应降档**必须说出来**：它会静默把 128K 改成 32K、把 f16 KV 改成 q4_0，
     # 用户以为自己设的生效了。记一条事件，界面据此明示一次（见 /api/events）。
@@ -2278,7 +2433,11 @@ class Handler(BaseHTTPRequestHandler):
                 # 启动时，界面靠它显示「上次使用 · 未加载」，并在首次对话时按需加载。
                 self.json(200, {"ok": True, "model": get_last_model()})
             elif p == "/api/models":
-                self.json(200, get_models())
+                # 每条额外带上后台补测到的**实测 KV**（fit_cache_for）—— 前端拿它把
+                # 显存徽章从"结构公式估算"升级为"llama.cpp 实测"，且不产生任何子进程：
+                # 只读本地缓存文件，逐条最多 3 次 os.stat。
+                self.json(200, [dict(m, kv_measured=fit_cache_for(m.get("path") or ""))
+                                for m in get_models()])
             elif p == "/api/switch" and data is not None:
                 # 一键换模型：停掉本管理器已知的全部实例 → 腾出端口（含外壳 / .bat 启动的旧进程）
                 # → 启动新模型。聊天框的模型选择器用它实现「选一个模型就装载」。
@@ -2634,4 +2793,7 @@ if __name__ == "__main__":
     # 这两个以前漏了（_sys_refresher 甚至从来没被 start 过）—— 见各自 docstring
     threading.Thread(target=_sys_refresher, daemon=True).start()
     threading.Thread(target=_gpu_refresher, daemon=True).start()
+    # 后台给「上次使用的模型」补一次实测 KV（B-L2）。只在没有实例运行时干活，
+    # 所以它既不拖慢加载、也不跟正在跑的模型抢显存。
+    threading.Thread(target=_fit_prewarm_loop, daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()

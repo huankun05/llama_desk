@@ -5,7 +5,6 @@
 	import {
 		ActionIcon,
 		DialogConversationRename,
-		DialogSettingsChat,
 		Logo,
 		SearchInput,
 		SidebarNavigationActions,
@@ -106,7 +105,6 @@
 	let selectedIds = new SvelteSet<string>();
 
 	let renameDialogOpen = $state(false);
-	let settingsDialogOpen = $state(false);
 	let renameTargetConversationId = $state<string | null>(null);
 	let renameDraft = $state('');
 	let renameOriginalTitle = $state('');
@@ -408,7 +406,6 @@
 					}
 				}}
 				onSearchClick={focusSearch}
-				onSettingsClick={() => (settingsDialogOpen = true)}
 			/>
 
 			{#if uiStore.isSidebarExpanded || isOnMobile}
@@ -468,8 +465,6 @@
 	onCancel={handleRenameCancel}
 	onConfirm={handleRenameConfirm}
 />
-
-<DialogSettingsChat bind:open={settingsDialogOpen} />
 
 <style>
 	aside {

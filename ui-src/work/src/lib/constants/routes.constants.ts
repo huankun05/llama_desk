@@ -11,14 +11,14 @@ export const URL_PARAMS = {
 export const ROUTES = {
 	/** Chat base — for dynamic chat URLs use RouterService. */
 	CHAT: '#/chat',
-	/** MCP servers. */
-	MCP_SERVERS: '#/mcp-servers',
 	/** Search — mobile-only full-page conversation search. */
 	SEARCH: '#/search',
 	/** Performance monitoring dashboard. */
 	PERFORMANCE: '#/performance',
 	/** Parameter panel — launch presets + launch/sampling parameters. */
 	PARAMETERS: '#/parameters',
+	/** Settings — full-page form (same shell as Performance / Parameters). */
+	SETTINGS: '#/settings',
 	/** Root — start of the app. */
 	START: '#/'
 } as const;

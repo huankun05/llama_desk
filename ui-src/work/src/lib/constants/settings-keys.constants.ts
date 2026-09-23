@@ -39,7 +39,6 @@ export const SETTINGS_KEYS = {
 	MENTION_SEARCH_MAX_DEPTH: 'mentionSearchMaxDepth',
 	MIN_P: 'min_p',
 	// Performance monitoring (added)
-	PERF_SHOW_FLOATING_BAR: 'perfShowFloatingBar',
 	PERF_REFRESH_INTERVAL_MS: 'perfRefreshIntervalMs',
 	PERF_SHOW_GPU_PANEL: 'perfShowGpuPanel',
 	PERF_SHOW_PREDICTED_VRAM: 'perfShowPredictedVram',

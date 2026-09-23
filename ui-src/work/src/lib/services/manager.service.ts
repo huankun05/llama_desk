@@ -50,6 +50,14 @@ export interface ManagerModel {
 	 */
 	aliases?: string[] | null;
 	/**
+	 * manager 后台补测出来的**实测** KV 账本：`{ f16: 10.6, q4_0: 2.6 }`（KiB/token）。
+	 *
+	 * 由 manager 的 `fit-cache.json` 提供（见其 `fit_cache_for`）—— 它只在**没有任何
+	 * 实例运行时**跑一次 `llama-fit-params`，所以这里拿到的是"现成结论"，不产生子进程。
+	 * 没有该字段 / 空对象 = 还没测过，前端回退结构公式估算（`kvCacheStore.ingest`）。
+	 */
+	kv_measured?: Record<string, number> | null;
+	/**
 	 * 配套的**视觉投影层**（mmproj）路径，manager 扫盘时按文件名／目录一对一配对出来的。
 	 *
 	 * 多模态模型的眼睛是单独一个 clip 架构的 gguf，必须用 `--mmproj` 显式喂给
