@@ -1200,6 +1200,53 @@
     'Could not change the keep-loaded setting': '无法修改常驻设置',
     'Model unloaded to save VRAM - send a message to load it again': '已为节省显存卸载模型 —— 发一条消息即可重新加载',
     'Launch parameters were lowered to fit your VRAM': '启动参数已按显存自动下调',
+    // ---------- 设置页「备份管理」 ----------
+    // 2026-09-23：该组件原本**整页写死中文**，是 static 审计
+    // （tools/diag/audit_hardcoded_cjk.mjs，308 个 .svelte 里唯一一个）报出来的漏翻文件 ——
+    // 中文用户看不出问题，英文模式下整页都是中文。现改为「英文源码 + 本表提供中文」。
+    'Local backup': '本地备份',
+    'Create backup': '创建备份',
+    'Choose backup folder': '选择备份文件夹',
+    'Import file': '导入文件',
+    'Confirm': '确认',
+    'Backup name (optional)': '备份名称（可选）',
+    'Include settings (chat / sampling parameters)': '包含设置（聊天 / 采样参数）',
+    'Include conversations (can be large)': '包含对话历史（可能较大）',
+    'Launch presets (including your own) are always included.': '启动方案（含你自建的方案）始终包含在备份中。',
+    'Save to local disk': '保存到本地磁盘',
+    'No backups yet. Click Create backup to make the first one.': '还没有备份。点击「创建备份」生成第一个。',
+    'presets': '方案',
+    'conversations': '对话',
+    'Restore': '恢复',
+    'Restore this backup': '恢复此备份',
+    'Export to file': '导出为文件',
+    'Delete this backup': '删除此备份',
+    // 两段说明在 DOM 里被 <code> 切成两个文本节点，所以前后两半都得有词条。
+    'Local disk hosting is unavailable in this browser (requires Chromium / WebView2 over a secure https or localhost context). Use Import file below to restore from a backup bundle; the desktop llama-desk build writes backups straight to disk (e.g.': '当前浏览器不支持本地磁盘托管（需 Chromium / WebView2，且为 https 或 localhost 安全上下文）。可用下方「导入文件」从备份文件恢复；桌面版 llama-desk 支持把备份直接写入本地磁盘（如',
+    ') and manages them automatically.': '）并自动管理。',
+    'No backup folder selected yet. Click Choose backup folder and pick': '尚未选择备份文件夹。点击「选择备份文件夹」并选中',
+    '(or any folder you like) — every backup is written straight there and manageable in this list. The choice is remembered, so you only authorize once.': '（或任意你喜欢的目录），之后所有备份将直接写入该目录、可在此列表里管理。选择一次后会被记住，无需重复授权。',
+    // 确认对话框：描述里带插值（备份名 / 文件名），拆成静态分片走 DialogConfirmation 的 descriptionSnippet。
+    'Restore this backup?': '恢复此备份？',
+    'Restore from “': '将用「',
+    '”: launch presets are merged by name (same name overwritten, ones created after the backup kept), settings imported as a whole': '」恢复：启动方案按名称合并去重（同名的覆盖、备份后新建的保留）、设置整体导入',
+    ', conversations merged by id (existing ones overwritten, new ones appended)': '、对话历史按 id 合并（已存在的覆盖、新的追加）',
+    '. Data you have not backed up is left untouched.': '。当前未备份的数据不会被覆盖。',
+    'Delete this backup?': '删除此备份？',
+    'This permanently deletes the local file “': '将永久删除本地文件「',
+    '”. This action cannot be undone.': '」。此操作不可撤销。',
+    // toast 与兜底异常文案（渲染成 toast 里的文本节点，走同一条匹配路径）
+    'Backup folder selected — future backups go straight to that directory': '已选择备份文件夹，后续备份将直接写入该目录',
+    'No folder selected, or permission was denied': '未选择文件夹或权限被拒绝',
+    'Backup created and saved to local disk': '备份已创建并保存到本地磁盘',
+    'Failed to create the backup': '创建备份失败',
+    'Restore complete (presets merged and de-duplicated). Reload the page to apply the settings.': '恢复完成（方案已合并去重），建议刷新页面以应用设置',
+    'Restored from file (presets merged and de-duplicated). Reload the page to apply the settings.': '已从文件恢复（方案已合并去重），建议刷新页面以应用设置',
+    'Restore failed': '恢复失败',
+    'Deleted': '已删除',
+    'Delete failed': '删除失败',
+    'Export failed': '导出失败',
+    'No file selected, or the file is not a valid backup': '未选择文件或文件无效',
     };
   // ---------- 带动态内容的文本：正则规则表 ----------
   // 上面 DICT 是「整个文本节点等值」匹配，只覆盖得了完全静态的文案。模板里一旦有

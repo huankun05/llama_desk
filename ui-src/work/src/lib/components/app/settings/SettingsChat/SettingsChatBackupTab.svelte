@@ -10,6 +10,8 @@
 	} from '@lucide/svelte';
 	import { DialogConfirmation, SettingsGroup } from '$lib/components/app';
 	import { Button } from '$lib/components/ui/button';
+	import { Checkbox } from '$lib/components/ui/checkbox';
+	import { Input } from '$lib/components/ui/input';
 	import {
 		chooseBackupDirectory,
 		deleteBackup,
@@ -43,7 +45,11 @@
 	// 确认对话框
 	let confirmOpen = $state(false);
 	let confirmTitle = $state('');
-	let confirmDesc = $state('');
+	// 描述里有插值（备份名 / 文件名）→ overlay 只能整节点匹配，翻不了拼出来的句子。
+	// 所以这里只存「往哪个句子里填」+ 填什么，真正的文案由模板里的静态分片拼出来。
+	let confirmKind = $state<'restore' | 'delete'>('restore');
+	let confirmName = $state('');
+	let confirmHasConversations = $state(false);
 	let confirmAction = $state<() => Promise<void>>(async () => {});
 
 	async function load() {
@@ -68,9 +74,9 @@
 		if (handle) {
 			dirReady = true;
 			await load();
-			toast.success('已选择备份文件夹，后续备份将直接写入该目录');
+			toast.success('Backup folder selected — future backups go straight to that directory');
 		} else {
-			toast.info('未选择文件夹或权限被拒绝');
+			toast.info('No folder selected, or permission was denied');
 		}
 	}
 
@@ -112,20 +118,22 @@
 				bundle.conversations = await conversationsStore.getConversationsForExport(ids);
 			}
 			await svcCreate(bundle);
-			toast.success('备份已创建并保存到本地磁盘');
+			toast.success('Backup created and saved to local disk');
 			showCreate = false;
 			newName = '';
 			await load();
 		} catch (err) {
-			const msg = err instanceof Error ? err.message : '创建备份失败';
+			const msg = err instanceof Error ? err.message : 'Failed to create the backup';
 			console.error(err);
 			toast.error(msg);
 		}
 	}
 
 	function askRestore(meta: BackupMeta) {
-		confirmTitle = '恢复此备份？';
-		confirmDesc = `将用「${meta.name}」恢复：启动方案按名称合并去重（同名的覆盖、备份后新建的保留）、设置整体导入${meta.conversation_count > 0 ? '、对话历史按 id 合并（已存在的覆盖、新的追加）' : ''}。当前未备份的数据不会被覆盖。`;
+		confirmKind = 'restore';
+		confirmName = meta.name;
+		confirmHasConversations = meta.conversation_count > 0;
+		confirmTitle = 'Restore this backup?';
 		confirmAction = async () => {
 			try {
 				const bundle = await readBackup(meta.filename);
@@ -137,9 +145,9 @@
 					const r = await conversationsStore.importConversationsData(bundle.conversations, true);
 					console.info('[备份恢复] 对话：', r);
 				}
-				toast.success('恢复完成（方案已合并去重），建议刷新页面以应用设置');
+				toast.success('Restore complete (presets merged and de-duplicated). Reload the page to apply the settings.');
 			} catch (err) {
-				const msg = err instanceof Error ? err.message : '恢复失败';
+				const msg = err instanceof Error ? err.message : 'Restore failed';
 				console.error(err);
 				toast.error(msg);
 			}
@@ -148,15 +156,16 @@
 	}
 
 	function askDelete(meta: BackupMeta) {
-		confirmTitle = '删除此备份？';
-		confirmDesc = `将永久删除本地文件「${meta.filename}」。此操作不可撤销。`;
+		confirmKind = 'delete';
+		confirmName = meta.filename;
+		confirmTitle = 'Delete this backup?';
 		confirmAction = async () => {
 			try {
 				await deleteBackup(meta.filename);
-				toast.success('已删除');
+				toast.success('Deleted');
 				await load();
 			} catch (err) {
-				const msg = err instanceof Error ? err.message : '删除失败';
+				const msg = err instanceof Error ? err.message : 'Delete failed';
 				console.error(err);
 				toast.error(msg);
 			}
@@ -169,7 +178,7 @@
 			const bundle = await readBackup(meta.filename);
 			downloadBundleFile(bundle);
 		} catch (err) {
-			const msg = err instanceof Error ? err.message : '导出失败';
+			const msg = err instanceof Error ? err.message : 'Export failed';
 			console.error(err);
 			toast.error(msg);
 		}
@@ -178,7 +187,7 @@
 	async function handleImportFile() {
 		const bundle = await pickBundleFile();
 		if (!bundle) {
-			toast.info('未选择文件或文件无效');
+			toast.info('No file selected, or the file is not a valid backup');
 			return;
 		}
 		try {
@@ -190,9 +199,9 @@
 				const r = await conversationsStore.importConversationsData(bundle.conversations, true);
 				console.info('[文件恢复] 对话：', r);
 			}
-			toast.success('已从文件恢复（方案已合并去重），建议刷新页面以应用设置');
+			toast.success('Restored from file (presets merged and de-duplicated). Reload the page to apply the settings.');
 		} catch (err) {
-			const msg = err instanceof Error ? err.message : '恢复失败';
+			const msg = err instanceof Error ? err.message : 'Restore failed';
 			console.error(err);
 			toast.error(msg);
 		}
@@ -204,77 +213,77 @@
 		<div
 			class="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300"
 		>
-			当前浏览器不支持本地磁盘托管（需 Chromium / WebView2，且为 https 或 localhost 安全上下文）。可用下方「导入文件」从备份文件恢复；桌面版
-			llama-desk 支持把备份直接写入本地磁盘（如 <code>D:\llama\backups\</code>）并自动管理。
+			Local disk hosting is unavailable in this browser (requires Chromium / WebView2 over a
+			secure https or localhost context). Use Import file below to restore from a backup bundle;
+			the desktop llama-desk build writes backups straight to disk (e.g. <code>D:\llama\backups\</code>) and manages them automatically.
 		</div>
 	{:else if !dirReady}
 		<div
 			class="rounded-md border border-blue-500/40 bg-blue-500/10 p-3 text-sm text-blue-700 dark:text-blue-300"
 		>
-			尚未选择备份文件夹。点击「选择备份文件夹」并选中
-			<code>D:\llama\backups</code>（或任意你喜欢的目录），之后所有备份将直接写入该目录、可在此列表里管理。选择一次后会被记住，无需重复授权。
+			No backup folder selected yet. Click Choose backup folder and pick
+			<code>D:\llama\backups</code> (or any folder you like) — every backup is written straight there
+			and manageable in this list. The choice is remembered, so you only authorize once.
 		</div>
 	{/if}
 
-	<SettingsGroup title="本地备份">
+	<SettingsGroup title="Local backup">
 		<div class="space-y-4">
 			<div class="flex flex-wrap items-center gap-2">
 				{#if diskMode}
 					<Button onclick={() => (showCreate = !showCreate)} variant="outline" disabled={!dirReady}>
 						<Plus class="h-4 w-4" />
-						创建备份
+						Create backup
 					</Button>
 					{#if dirReady}
 						<Button onclick={load} variant="ghost">
 							<RotateCcw class="h-4 w-4" />
-							刷新
+							Refresh
 						</Button>
 					{:else}
 						<Button onclick={chooseFolder} variant="outline">
 							<FolderOpen class="h-4 w-4" />
-							选择备份文件夹
+							Choose backup folder
 						</Button>
 					{/if}
 				{/if}
 				<Button onclick={handleImportFile} variant="outline">
 					<Upload class="h-4 w-4" />
-					导入文件
+					Import file
 				</Button>
 			</div>
 
 			{#if showCreate && dirReady}
 				<div class="space-y-3 rounded-md border border-border p-4">
-					<input
-						class="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-						placeholder="备份名称（可选）"
-						bind:value={newName}
-					/>
+					<Input bind:value={newName} placeholder="Backup name (optional)" />
 					<label class="flex items-center gap-2 text-sm">
-						<input type="checkbox" bind:checked={includeSettings} />
-						包含设置（聊天 / 采样参数）
+						<Checkbox bind:checked={includeSettings} />
+						<span>Include settings (chat / sampling parameters)</span>
 					</label>
 					<label class="flex items-center gap-2 text-sm">
-						<input type="checkbox" bind:checked={includeConversations} />
-						包含对话历史（可能较大）
+						<Checkbox bind:checked={includeConversations} />
+						<span>Include conversations (can be large)</span>
 					</label>
 					<p class="text-xs text-muted-foreground">
-						启动方案（含你自建的方案）始终包含在备份中。
+						<span>Launch presets (including your own) are always included.</span>
 					</p>
 					<div class="flex gap-2">
 						<Button onclick={handleCreate}>
 							<HardDrive class="h-4 w-4" />
-							保存到本地磁盘
+							Save to local disk
 						</Button>
-						<Button onclick={() => (showCreate = false)} variant="ghost">取消</Button>
+						<Button onclick={() => (showCreate = false)} variant="ghost">Cancel</Button>
 					</div>
 				</div>
 			{/if}
 
 			{#if diskMode && dirReady}
 				{#if loading}
-					<p class="text-sm text-muted-foreground">加载中…</p>
+					<p class="text-sm text-muted-foreground">Loading…</p>
 				{:else if backups.length === 0}
-					<p class="text-sm text-muted-foreground">还没有备份。点击「创建备份」生成第一个。</p>
+					<p class="text-sm text-muted-foreground">
+						<span>No backups yet. Click Create backup to make the first one.</span>
+					</p>
 				{:else}
 					<div class="divide-y divide-border rounded-md border border-border">
 						{#each backups as b (b.filename)}
@@ -282,9 +291,12 @@
 								<div class="min-w-0">
 									<div class="truncate text-sm font-medium">{b.name}</div>
 									<div class="truncate text-xs text-muted-foreground">
-										{formatDate(b.created_at)} · {formatSize(b.size_bytes)} · 方案 {b.preset_count}
-										· 对话 {b.conversation_count}
-										· {b.has_settings ? '含设置' : '无设置'}
+										{formatDate(b.created_at)} · {formatSize(b.size_bytes)} ·
+										<span>presets</span>
+										{b.preset_count} ·
+										<span>conversations</span>
+										{b.conversation_count} ·
+										<span>{b.has_settings ? 'with settings' : 'no settings'}</span>
 									</div>
 								</div>
 								<div class="flex gap-1">
@@ -292,28 +304,28 @@
 										onclick={() => askRestore(b)}
 										size="sm"
 										variant="outline"
-										title="恢复此备份"
+										title="Restore this backup"
 									>
 										<RotateCcw class="h-3.5 w-3.5" />
-										恢复
+										Restore
 									</Button>
 									<Button
 										onclick={() => handleExportMeta(b)}
 										size="sm"
 										variant="ghost"
-										title="导出为文件"
+										title="Export to file"
 									>
 										<Download class="h-3.5 w-3.5" />
-										导出
+										Export
 									</Button>
 									<Button
 										onclick={() => askDelete(b)}
 										size="sm"
 										variant="outline"
-										title="删除此备份"
+										title="Delete this backup"
 									>
 										<Trash2 class="h-3.5 w-3.5" />
-										删除
+										Delete
 									</Button>
 								</div>
 							</div>
@@ -327,9 +339,8 @@
 
 <DialogConfirmation
 	bind:open={confirmOpen}
-	cancelText="取消"
-	confirmText="确认"
-	description={confirmDesc}
+	cancelText="Cancel"
+	confirmText="Confirm"
 	icon={RotateCcw}
 	onCancel={() => (confirmOpen = false)}
 	onConfirm={async () => {
@@ -338,4 +349,23 @@
 	}}
 	title={confirmTitle}
 	variant="destructive"
-/>
+>
+	<!--
+		描述里有插值，所以拆成静态分片 + 独立动态节点：
+		overlay.js 按「整个文本节点精确等值」查词条，只有拆开才翻得到。
+	-->
+	{#snippet descriptionSnippet()}
+		{#if confirmKind === 'restore'}
+			<span>Restore from “</span><span>{confirmName}</span><span
+				>”: launch presets are merged by name (same name overwritten, ones created after the
+				backup kept), settings imported as a whole</span
+			>{#if confirmHasConversations}<span
+					>, conversations merged by id (existing ones overwritten, new ones appended)</span
+				>{/if}<span>. Data you have not backed up is left untouched.</span>
+		{:else}
+			<span>This permanently deletes the local file “</span><span>{confirmName}</span><span
+				>”. This action cannot be undone.</span
+			>
+		{/if}
+	{/snippet}
+</DialogConfirmation>

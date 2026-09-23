@@ -27,8 +27,10 @@
 	} from '@lucide/svelte';
 	import { CollapsibleSection, SettingsChatFields } from '$lib/components/app';
 	import { Button } from '$lib/components/ui/button';
+	import { Checkbox } from '$lib/components/ui/checkbox';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+	import * as Select from '$lib/components/ui/select';
 	import {
 		API_SLOTS,
 		APP_NAME,
@@ -2205,7 +2207,7 @@
 			/>
 			<input
 				type="search"
-				class="w-full rounded-md border border-border bg-background py-1.5 pr-3 pl-9 text-sm"
+				class="w-full rounded-md border border-input bg-background py-1.5 pr-3 pl-9 text-sm"
 				placeholder="Search models…"
 				bind:value={modelQuery}
 			/>
@@ -2476,7 +2478,7 @@
 			>
 				<input
 					bind:value={renamePresetName}
-					class="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-sm"
+					class="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-sm"
 					onkeydown={(e: KeyboardEvent) => {
 						if (e.key === 'Enter') doMenuRenamePreset();
 						if (e.key === 'Escape') renamePresetId = '';
@@ -2524,37 +2526,23 @@
 					<span>Unload when idle for</span>
 				</span>
 				<!--
-					自绘下拉，**不用原生 <select>**：原生弹出层是系统组件、直角，箭头在展开/收起时
-					毫无变化、还容易压到文字。这里用项目里「模型下拉」同一套 DropdownMenu：
-					触发器自己排版（右侧预留间距 + 箭头不与文字重叠），
-					箭头靠 trigger 上的 `group` + `data-[state=open]` 旋转，
-					弹出面板是 `rounded-md border bg-popover shadow-md`（圆角、跟随主题）。
+					统一走设置页「主题」那一把自绘 Select —— 全项目的**取值下拉**只有这一个组件。
+					（以前这里是用 DropdownMenu + RadioGroup 自己拼的，和设置页那把长得不一样。）
 				-->
-				<DropdownMenu.Root>
-					<DropdownMenu.Trigger
-						class="group inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md border border-border bg-background pr-1.5 pl-2 font-mono text-xs text-foreground transition-colors hover:border-primary/40 data-[state=open]:border-primary/60"
-					>
-						<span>{idleTtlLabel}</span>
-						<ChevronDown
-							class="size-3 shrink-0 opacity-60 transition-transform duration-200 group-data-[state=open]:-rotate-180"
-						/>
-					</DropdownMenu.Trigger>
-					<DropdownMenu.Content align="start" class="min-w-[7rem]">
-						<DropdownMenu.RadioGroup
-							onValueChange={(v) => setIdleTtl(Number(v))}
-							value={String(idleTtl)}
-						>
-							{#each IDLE_TTL_OPTIONS as o (o.value)}
-								<DropdownMenu.RadioItem
-									class="py-1 font-mono text-xs"
-									value={o.value}
-								>
-									{o.label}
-								</DropdownMenu.RadioItem>
-							{/each}
-						</DropdownMenu.RadioGroup>
-					</DropdownMenu.Content>
-				</DropdownMenu.Root>
+				<Select.Root
+					onValueChange={(v) => setIdleTtl(Number(v))}
+					type="single"
+					value={String(idleTtl)}
+				>
+					<Select.Trigger class="w-fit shrink-0 font-mono text-xs" size="sm">
+						{idleTtlLabel}
+					</Select.Trigger>
+					<Select.Content class="min-w-[7rem]">
+						{#each IDLE_TTL_OPTIONS as o (o.value)}
+							<Select.Item class="font-mono text-xs" label={o.label} value={o.value} />
+						{/each}
+					</Select.Content>
+				</Select.Root>
 				<span class="text-muted-foreground">
 					<span>frees VRAM while the model sits unused</span>
 				</span>
@@ -2575,45 +2563,32 @@
 					</div>
 
 					<div class="flex items-center gap-2">
-						<!--
-							同样是自绘下拉（原生 <select> 的弹出层是系统直角菜单、箭头不随展开变化）。
-							分组用 DropdownMenu.Group + GroupHeading 还原原来的 <optgroup>。
-						-->
-						<DropdownMenu.Root>
-							<DropdownMenu.Trigger
-								class="group inline-flex h-8 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-1 font-mono text-sm text-foreground transition-colors hover:border-primary/40 data-[state=open]:border-primary/60"
-							>
+						<!-- 取值下拉＝设置页「主题」同一个 Select；分组用 Select.Group 还原 <optgroup>。 -->
+						<Select.Root
+							onValueChange={(v) => doSelectPreset(v)}
+							type="single"
+							value={targetActivePresetId}
+						>
+							<Select.Trigger class="min-w-0 flex-1 font-mono text-sm">
 								<span class="truncate">{launchPresetsStore.presetNameFor(targetModel)}</span>
-								<ChevronDown
-									class="size-3.5 shrink-0 opacity-60 transition-transform duration-200 group-data-[state=open]:-rotate-180"
-								/>
-							</DropdownMenu.Trigger>
-							<DropdownMenu.Content align="start" class="max-w-[18rem] min-w-[12rem]">
-								<DropdownMenu.RadioGroup
-									onValueChange={(v) => doSelectPreset(v)}
-									value={targetActivePresetId}
-								>
-									<DropdownMenu.Group>
-										<DropdownMenu.GroupHeading>Global presets</DropdownMenu.GroupHeading>
-										{#each launchPresetsStore.presets as p (p.id)}
-											<DropdownMenu.RadioItem class="text-xs" value={p.id}>
-												{p.name}
-											</DropdownMenu.RadioItem>
+							</Select.Trigger>
+							<Select.Content class="max-w-[18rem] min-w-[12rem]">
+								<Select.Group>
+									<Select.GroupHeading>Global presets</Select.GroupHeading>
+									{#each launchPresetsStore.presets as p (p.id)}
+										<Select.Item class="text-xs" label={p.name} value={p.id} />
+									{/each}
+								</Select.Group>
+								{#if targetOwnPresets.length > 0}
+									<Select.Group>
+										<Select.GroupHeading>Saved for this model</Select.GroupHeading>
+										{#each targetOwnPresets as p (p.id)}
+											<Select.Item class="text-xs" label={p.name} value={p.id} />
 										{/each}
-									</DropdownMenu.Group>
-									{#if targetOwnPresets.length > 0}
-										<DropdownMenu.Group>
-											<DropdownMenu.GroupHeading>Saved for this model</DropdownMenu.GroupHeading>
-											{#each targetOwnPresets as p (p.id)}
-												<DropdownMenu.RadioItem class="text-xs" value={p.id}>
-													{p.name}
-												</DropdownMenu.RadioItem>
-											{/each}
-										</DropdownMenu.Group>
-									{/if}
-								</DropdownMenu.RadioGroup>
-							</DropdownMenu.Content>
-						</DropdownMenu.Root>
+									</Select.Group>
+								{/if}
+							</Select.Content>
+						</Select.Root>
 						<button
 							class="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs hover:bg-accent"
 							onclick={openSavePreset}
@@ -2631,7 +2606,7 @@
 						>
 							<input
 								bind:value={newPresetName}
-								class="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-sm"
+								class="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-sm"
 								onkeydown={(e: KeyboardEvent) => {
 									if (e.key === 'Enter') doSavePreset();
 									if (e.key === 'Escape') showSavePreset = false;
@@ -2669,7 +2644,7 @@
 						>
 							<input
 								bind:value={renameName}
-								class="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-sm"
+								class="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 text-sm"
 								onkeydown={(e: KeyboardEvent) => {
 									if (e.key === 'Enter') doRenamePreset();
 									if (e.key === 'Escape') renameTargetId = '';
@@ -2789,7 +2764,7 @@
 							<label class="flex flex-col gap-1">
 								<span class="text-xs text-muted-foreground">Context size</span>
 								<input
-									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
+									class="rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
 									max={editTarget === 'model' ? (m.ctx_train ?? undefined) : undefined}
 									min="2048"
 									onchange={(e: Event) =>
@@ -2802,35 +2777,23 @@
 
 							<label class="flex flex-col gap-1">
 								<span class="text-xs text-muted-foreground">KV precision</span>
-								<!-- 自绘下拉（同空闲卸载）：原生 select 的系统弹出层是直角、不跟主题 -->
-								<DropdownMenu.Root>
-									<DropdownMenu.Trigger
-										class="group inline-flex h-8 items-center justify-between gap-2 rounded-md border border-border bg-background px-2 py-1 font-mono text-sm text-foreground transition-colors hover:border-primary/40 data-[state=open]:border-primary/60"
-									>
-										<span>{cfg.ctk}</span>
-										<ChevronDown
-											class="size-3.5 shrink-0 opacity-60 transition-transform duration-200 group-data-[state=open]:-rotate-180"
-										/>
-									</DropdownMenu.Trigger>
-									<DropdownMenu.Content align="start" class="min-w-[7rem]">
-										<DropdownMenu.RadioGroup
-											onValueChange={(v) => onCtk(v)}
-											value={cfg.ctk}
-										>
-											{#each ['f16', 'q8_0', 'q4_0'] as q (q)}
-												<DropdownMenu.RadioItem class="py-1 font-mono text-xs" value={q}>
-													{q}
-												</DropdownMenu.RadioItem>
-											{/each}
-										</DropdownMenu.RadioGroup>
-									</DropdownMenu.Content>
-								</DropdownMenu.Root>
+								<!-- 取值下拉＝设置页「主题」同一个 Select -->
+								<Select.Root onValueChange={(v) => onCtk(v)} type="single" value={cfg.ctk}>
+									<Select.Trigger class="w-full font-mono text-sm" size="sm">
+										{cfg.ctk}
+									</Select.Trigger>
+									<Select.Content class="min-w-[7rem]">
+										{#each ['f16', 'q8_0', 'q4_0'] as q (q)}
+											<Select.Item class="font-mono text-xs" label={q} value={q} />
+										{/each}
+									</Select.Content>
+								</Select.Root>
 							</label>
 
 							<label class="flex flex-col gap-1">
 								<span class="text-xs text-muted-foreground">GPU layers (ngl)</span>
 								<input
-									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
+									class="rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
 									min="0"
 									onchange={(e: Event) =>
 										onNgl(Number((e.currentTarget as HTMLInputElement).value))}
@@ -2847,7 +2810,7 @@
 							<label class="flex flex-col gap-1">
 								<span class="text-xs text-muted-foreground">Parallel slots (np)</span>
 								<input
-									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
+									class="rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
 									min="1"
 									onchange={(e: Event) =>
 										onNp(Number((e.currentTarget as HTMLInputElement).value))}
@@ -2860,7 +2823,7 @@
 							<label class="flex flex-col gap-1">
 								<span class="text-xs text-muted-foreground">Threads (-t)</span>
 								<input
-									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
+									class="rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
 									min="1"
 									onchange={(e: Event) =>
 										onThreads(Number((e.currentTarget as HTMLInputElement).value))}
@@ -2876,7 +2839,7 @@
 							<label class="flex flex-col gap-1">
 								<span class="text-xs text-muted-foreground">Batch size (-b)</span>
 								<input
-									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
+									class="rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
 									min="32"
 									onchange={(e: Event) =>
 										onBatch(Number((e.currentTarget as HTMLInputElement).value))}
@@ -2889,7 +2852,7 @@
 							<label class="flex flex-col gap-1">
 								<span class="text-xs text-muted-foreground">Micro-batch (-ub)</span>
 								<input
-									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
+									class="rounded-md border border-input bg-background px-2 py-1 font-mono text-sm"
 									min="16"
 									onchange={(e: Event) =>
 										onUbatch(Number((e.currentTarget as HTMLInputElement).value))}
@@ -2903,12 +2866,9 @@
 							</label>
 
 							<label class="flex items-center gap-2 pt-1">
-								<input
+								<Checkbox
 									checked={cfg.flash_attn}
-									class="h-4 w-4"
-									onchange={(e: Event) =>
-										onFlashAttn((e.currentTarget as HTMLInputElement).checked)}
-									type="checkbox"
+									onCheckedChange={(checked) => onFlashAttn(Boolean(checked))}
 								/>
 								<span class="text-xs text-muted-foreground">Flash Attention</span>
 							</label>

@@ -51,6 +51,8 @@ tools\
 | `probe_load_progress_ui.mjs` | **C+D 的端到端验收探针**（4 场景 18 项 + 出图到 `diag/shots-20260923-c/`）：① 加载中的分阶段进度（阶段名 / 百分比·已用·预计 / 自动降档明示 / 进度条宽度）；② 起不来时**红条 + 真实原因**而不是干等超时；③ 空闲倒计时＋常驻开关（真调 `/pin` 且 `pinned=true`）＋卸载后**恰好一次** toast；④ 常驻中显示「常驻中」且不再显示倒计时。<br>手法：**只拦后端响应，前端一行不改**（`/api/switch`、`/health`、`/api/instances/<id>/progress`、`/api/instances`、`/api/events`、`/props`），走的是同一条前端代码路径。<br>⚠️ `/api/models` **绝不拦**（要真实字段，伪一条会导致整页白屏）；⚠️ 带查询串的端点必须用正则拦（`**/props` 匹配不到 `?autoload=false`）；⚠️ 性能页判「已加载」看的是 `/props` 不是 `/api/instances`。详见 `docs/notes/webui-cache-debug.md` §8。 |
 | `probe_launch_merge_and_collapse.mjs` | **「启动参数合并成一页 + 通用折叠分节」的验收探针**（7 场景 35 项 + 出图到 `diag/shots-20260923-merge/`）：①「编辑对象」开关存在；② 选「仅本模型」→ 写进 `webui.launchPresets.byModel` 且**不动任何方案**；③ 选「方案默认值」→ 写进 `webui.launchPresets` 且**不动覆盖**（②③ 就是「同一套表单、两个数据源、互不串写」的核心证明）；④「管理方案」菜单列出 新建/重命名/删除/恢复内置；⑤ 性能页分节可折叠并落到 `webui.perf.sections`；⑥ 参数页只剩采样（**无** `Active preset` 下拉、有跳转提示）且折叠落到 `webui.parameters.sections`；⑦ 设置页无「性能」分区、面板可折叠、切分区后**恢复展开**（锁定 `{#key currentSection.slug}` 这个修复，去掉就会 FAIL）。<br>⚠️ 启动参数的数值输入绑的是 **`onchange`** 不是 `oninput` → Playwright 只 `fill()` 不会提交，**必须再 `blur()`**，否则误报「没写进去」（第一版就栽在这，2 项假 FAIL）。 |
 | `shot_layout_review.mjs` | **纯出图**的布局复核脚本（不做断言），产出 `07-setup-scrolled.png` … `10-settings-panel.png`，用来人工眼看「合并后的启动参数一页到底长什么样」。只截不点。 |
+| `shot_dropdowns_r5.mjs` | **下拉统一样式复核出图**（不做断言，产出 `diag/shots-20260923-dropdowns/`）：① 设置页「主题」下拉（标杆）；② 设置页「语言」下拉（本轮从原生 `<select>` 并回自绘 `Select`）；③ 备份管理整页；④ 性能页取值下拉。定位方式：设置页组合框只有 主题/语言两个，按 `button[role=combobox]` 的 **nth(0)/nth(1)** 点。 |
+| `shot_perf_dropdowns_r5.mjs` | 性能页「方案选择」「KV 精度」下拉的出图（本轮 `DropdownMenu+RadioGroup` → `Select`）。先 `console.log` 出本页全部 combobox 文本（应为 `["5 分钟","均衡 32K","f16"]`），再按文本正则挑出方案/KV 那个点开截图。 |
 | `idle_dropdown_probe.mjs` | **「空闲卸载」下拉定点诊断**：触发器 class/`data-state`、箭头 `rotate`、弹出面板真实圆角/背景/层级链。怀疑「下拉 UI 还是系统组件」时先跑它。 |
 | `mock_webui_server.py` | 没有后端时起一个假 `:8080`，用来单独验 UI（静态目录写死 `D:\llama\webui`）。 |
 | `start_for_ui.py` | 起一个测试用模型实例（给 UI 验证提供数据源），用完自动空闲卸载。 |
@@ -139,7 +141,8 @@ node tools/ui/ui_probe.mjs http://127.0.0.1:8080
 | `diag\diag_cdp.mjs` | 零依赖 CDP 采集器（Node 自带 `fetch`/`WebSocket`）：DOM 中英文节点数、属性漏翻、控制台 error/warning、逐资源 HTTP 状态/字节/缓存、页面截图、语言切换自检。 |
 | `diag\diag_ls.mjs` | localStorage 取证器：直接二进制扫 leveldb，即使 CDP 连不上也能读出「overlay 脚本跑没跑、语言是什么、方案还在不在」。 |
 | `diag\probe_procs_gpu.py` | 把 `manager.py` 里那段「进程 + 按进程显存」的 PowerShell 探针**原样跑一遍并打印完整命令行**。界面上一行「无人管理」到底是什么进程、为什么被判成 foreign，跑它。<br>只读，不起服务、不杀进程。 |
-| `diag\list_native_selects.mjs [url]` | 列出页面上还剩哪些**原生 `<select>`**（正常输出 `[]`）。原生 select 的弹出层是系统直角菜单、箭头不随展开变化 —— 性能页三处下拉已全部自绘，用它兜底复查。 |
+| `diag\list_native_selects.mjs [url]` | 列出页面上还剩哪些**原生 `<select>`**（正常输出 `[]`）。原生 select 的弹出层是系统直角菜单、箭头不随展开变化 —— 第 5 轮起**全项目已清零**（最后一个是设置页的「语言」，并回了自绘 `Select`），用它兜底复查。 |
+| `diag\audit_hardcoded_cjk.mjs` | **模板里硬编码中文的 AST 审计**：本项目是「英文源码 + overlay 词典」，模板里出现中文 = 英文模式下漏翻。逐 `.svelte` 走 Svelte AST，只报**模板文本/可见属性**里的 CJK，**排除注释与 `{#if}` 等块内代码**（所以性能页 346 行中文注释不算）。正常输出「0 处」。第 5 轮靠它揪出备份页整页 35 处中文。 |
 | `diag\list_bad_responses.mjs [url]` | 列出页面加载时所有 **≥400 的响应**。哨兵模式下稳定出现 `400 /slots`、`403 /tools`，属预期。 |
 
 跑一次约 60~90 秒，产物落在 `D:\llama\diag\<时间戳>\`（**注意：`diag\` 是报告输出目录，

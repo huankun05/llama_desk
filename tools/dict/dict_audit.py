@@ -147,6 +147,10 @@ ALLOW = {
     'llama-server :8080', 'llama.cpp', 'GGUF', 'mmproj',
     r'webui\restart-manager.bat',
     r'D:\llama\models · D:\llama\models\from-ollama',
+    # 备份页说明里的示例路径（两处 <code>，一处带尾部反斜杠）——机器路径，不翻。
+    # ⚠️ 带尾部反斜杠那条**不能**写成 r'...\'（raw 串不能以单反斜杠结尾，语法错误）。
+    r'D:\llama\backups',
+    'D:\\llama\\backups\\',
 }
 
 allf = []

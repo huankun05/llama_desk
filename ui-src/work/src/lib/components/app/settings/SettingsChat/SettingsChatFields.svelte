@@ -159,12 +159,27 @@
 						</Label>
 					</div>
 				{/if}
-			{:else if field.type === SettingsFieldType.SELECT && field.key !== SETTINGS_KEYS.LANGUAGE}
+			{:else if field.type === SettingsFieldType.SELECT}
+				<!--
+					语言与主题走**同一条**自绘 Select 通路。
+					⚠️ 这里以前把 LANGUAGE 排除掉、在下面单独渲染一个原生 `<select>` —— 那正是
+					「主题好看、语言丑」的根源（原生弹出层是系统组件：直角、蓝色焦点环、不跟主题）。
+					而本分支的 onValueChange 里本来就有 __overlaySetLocale，排除它是多余的。
+				-->
+				{@const currentValue =
+					field.key === SETTINGS_KEYS.LANGUAGE
+						? String(
+								localConfig[field.key] ||
+									(typeof localStorage !== 'undefined'
+										? localStorage.getItem('webui.lang')
+										: '') ||
+									'zh'
+							)
+						: localConfig[field.key]}
 				{@const selectedOption = field.options?.find(
 					(opt: { value: string; label: string; icon?: Component }) =>
-						opt.value === localConfig[field.key]
+						opt.value === currentValue
 				)}
-				{@const currentValue = localConfig[field.key]}
 				{@const serverDefault = currentModelParams[field.key]}
 				{@const isCustomRealTime = (() => {
 					if (serverDefault == null) return false;
@@ -250,38 +265,6 @@
 					</Select.Content>
 				</Select.Root>
 
-				{#if field.help || SETTING_CONFIG_INFO[field.key]}
-					<p class="mt-1 text-xs text-muted-foreground">
-						{field.help || SETTING_CONFIG_INFO[field.key]}
-					</p>
-				{/if}
-			{:else if field.key === SETTINGS_KEYS.LANGUAGE}
-				{@const currentLang = String(
-					localConfig[field.key] ||
-						(typeof localStorage !== 'undefined' ? localStorage.getItem('webui.lang') : '') ||
-						'zh'
-				)}
-
-				<div class="relative w-full md:w-auto">
-					<select
-						class="w-full rounded-md border border-border bg-background px-3 py-1.5 text-sm"
-						value={currentLang}
-						onchange={(e: Event) => {
-							const v = (e.currentTarget as HTMLSelectElement).value;
-							// 实时翻译（overlay.js 暴露的全局函数，切换无需 reload）
-							// eslint-disable-next-line @typescript-eslint/no-explicit-any
-							(window as any).__overlaySetLocale?.(v);
-							// 写回官方 config 仅作持久化，失败不影响切换
-							try {
-								onConfigChange?.(field.key, v);
-							} catch (_) {}
-						}}
-					>
-						{#each field.options as o (o.value)}
-							<option value={o.value}>{o.label}</option>
-						{/each}
-					</select>
-				</div>
 				{#if field.help || SETTING_CONFIG_INFO[field.key]}
 					<p class="mt-1 text-xs text-muted-foreground">
 						{field.help || SETTING_CONFIG_INFO[field.key]}
