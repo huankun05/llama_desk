@@ -71,6 +71,13 @@
 /rollback/
 /backup/
 
+# ── ⑧b 探针/验证产物（截图、临时输出；diag/ 只保留 *.md 报告）──────
+/diag/shots-*/
+/diag/*.png
+/diag/*.txt
+/diag/*.json
+/diag/2*/
+
 # ── ⑨ Python ─────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
