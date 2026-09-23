@@ -791,6 +791,20 @@ webui/manager_pkg/
 
 > 做完这批：**从"想用某模型"到"跑起来"全程不出应用**。
 
+> **进度（2026-09-23）：8（B-L3）完成；7（A）未开始。**
+> 性能页「加载后预测显存占用」卡片里，原来那根只有百分比的进度条换成**五段堆叠预算条**：
+> `权重 / KV / 缓冲与开销 / 桌面与其他程序 / 空闲`，外加一条**「全层上卡线」**（= `modelNeed / 整卡`），
+> 装不下时整条套红环 + 红字「超出容量 N GB」。数字全来自现有口径，没有新后端：
+> - `weights/kv/overhead` ← 前端既有 `estimate`（`estimateVram`，与徽章同源）。
+> - `桌面与其他程序` ← `cleanupReport.gpu.used_mib − Σ(managed|active 实例 vram)`，卡片挂载时
+>   `loadCleanup()` 自动拉一次（实测本机空载 ≈ 2.5 GB）。
+> - `整卡` ← `sys.vram_total_gb`（manager `/api/system-metrics`）。
+> ⚠️ 这是**空间占比、不是涨跌** → 中性/主题色梯度（primary 不透明度 + muted），**不用涨红跌绿**。
+> 验收：`svelte-check` 0/0、`vite build` ✅ → `deploy.ps1` `overlay.js?v=80`；
+> 回归探针 63/63（`probe_launch_merge_and_collapse` 35、`probe_settings_page` 12、`probe_nav_active_and_sections` 16）；
+> 新探针 `tools/ui/shot_b_l3_vram_bar.mjs` 实测选 7B 模型：6.49 + 2.58 − 8.0 = **1.07 GB 超容量**（与红字一致），
+> 6 条中文图例全中（出图 `diag/shots-20260923-bL3/`）。
+
 ### 第 3 批（2 天 · 可观测性）
 9. **F GPU 健康 / 归因面板**
 10. **E 一键基准 + 留档**（轻量档先上，严格档后补）

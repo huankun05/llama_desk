@@ -999,7 +999,6 @@
     'This model follows the selected preset.': '该模型跟随所选方案。',
     'Server not reachable.': '无法连接服务器。',
     'Slot activity': '槽位活动',
-    'Predicted share of VRAM': '预测占用 / 显存总量',
     // /props 的 modalities 命中项会渲染成单个文本节点，这里按小写原名匹配
     'text': '文本',
     'vision': '视觉',
@@ -1014,6 +1013,12 @@
     'Compute buffer': '计算缓冲',
     'Framework': '框架开销',
     'Free VRAM after load': '加载后剩余显存',
+    // B-L3 显存预算条（第 2 批）
+    'VRAM budget': '显存预算',
+    'Buffers & overhead': '缓冲与开销',
+    'Desktop & other apps': '桌面与其他程序',
+    'All layers on GPU': '全层上卡线',
+    'Over capacity': '超出容量',
     'Max context on this GPU': '本卡最大上下文',
     'Enough for this model\'s full context:': '足够装下该模型的完整上下文：',
     'KV is computed from this model\'s layer and head counts.': 'KV 按该模型的层数与注意力头数精确计算。',

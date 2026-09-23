@@ -1407,6 +1407,56 @@
 	/** 加载后还剩多少显存（负值表示装不下） */
 	const leftVramGb = $derived(estimate && vramTotalGb ? vramTotalGb - estimate.total_gb : null);
 
+	/**
+	 * 「桌面 + 其他程序」已经吃掉的那部分显存 = 整卡已用 − 我们自己那个活跃实例的实际占用。
+	 *
+	 * ⚠️ 这块**必须单独画出来**：实测本机空载就有约 1.9 GB 被 Lively 壁纸 + 6×WebView2 +
+	 * 4×Electron 占着，不画出来用户永远算不明白「8 GB 为什么只能当 6 GB 用」。
+	 * 取不到 GPU 盘点（cleanupReport）时返回 null，条上就不画这一段。
+	 */
+	const otherVramGb = $derived.by(() => {
+		const used = cleanupReport?.gpu.used_mib;
+
+		if (used == null) return null;
+		// 我们自己的实例（managed / 占活跃端口的那个）不算「桌面占用」
+		const oursMib =
+			cleanupReport?.processes
+				.filter((p) => p.kind === 'managed' || p.kind === 'active')
+				.reduce((s, p) => s + (p.vram_mib ?? 0), 0) ?? 0;
+
+		return Math.max(0, (used - oursMib) / 1024);
+	});
+
+	/**
+	 * B-L3 显存预算条：把「整卡容量」拆成
+	 * 权重 / KV / 缓冲开销 / 桌面占用 / 空闲 五段，让「装不装得下」一眼看到而不是算出来。
+	 *
+	 * ⚠️ 这是**空间占比**，不是涨跌 → 用中性/主题色梯度（primary 的不同透明度 + muted），
+	 * **绝不用涨红跌绿**。
+	 */
+	const vramBudget = $derived.by(() => {
+		if (!estimate || !vramTotalGb || vramTotalGb <= 0) return null;
+
+		const weights = Math.max(0, estimate.weights_gb);
+		const kv = Math.max(0, estimate.kv_gb);
+		const overhead = Math.max(0, estimate.compute_gb + estimate.framework_gb);
+		const modelNeed = weights + kv + overhead;
+		const desktop = otherVramGb ?? 0;
+		const free = vramTotalGb - modelNeed - desktop;
+
+		return {
+			desktop,
+			free: Math.max(0, free),
+			kv,
+			modelNeed,
+			/** 负值时取绝对值 = 超出容量的量 */
+			overflow: free < 0 ? -free : 0,
+			overhead,
+			total: vramTotalGb,
+			weights
+		};
+	});
+
 	// ===== 换模型 =====
 	/**
 	 * 优先走 `/api/switch`（一次调用完成「停旧 → 腾端口 → 起新」）。
@@ -3003,30 +3053,112 @@
 								</div>
 							</dl>
 
-							{#if vramFitPercent !== null}
+							<!--
+								B-L3 显存预算条：把整卡容量拆成
+								「权重 / KV / 缓冲与开销 / 桌面占用 / 空闲」五段。
+								比原来那根只有百分比的进度条多说三件事：
+								① 桌面与其他程序白占的那块（本机空载约 1.9 GB）；
+								② 「全层上卡线」在哪（线右边还得放得下桌面占用才算装得下）；
+								③ 装不下时超了多少。
+								⚠️ 这是空间占比、不是涨跌 → 中性/主题色梯度（primary 不同透明度 + muted）。
+							-->
+							{#if vramBudget}
 								<div class="mt-4">
-									<div class="mb-1 flex justify-between text-xs text-muted-foreground">
-										<span>Predicted share of VRAM</span>
-										<span
-											class={vramFitPercent > 90
-												? 'text-red-500'
-												: vramFitPercent > 70
-													? 'text-amber-500'
-													: 'text-emerald-500'}
-										>
-											{vramFitPercent.toFixed(0)}%
+									<div
+										class="mb-1.5 flex flex-wrap items-baseline justify-between gap-x-2 text-xs"
+									>
+										<span class="text-muted-foreground">VRAM budget</span>
+										<span class="text-muted-foreground">
+											<span
+												class={vramBudget.overflow > 0
+													? 'text-red-500'
+													: vramFitPercent != null && vramFitPercent > 70
+														? 'text-amber-500'
+														: 'text-emerald-500'}
+												>{vramFitPercent != null ? vramFitPercent.toFixed(0) : '—'}%</span
+											>
+											·
+											<span class="font-mono"
+												>{estimate.total_gb.toFixed(2)} / {vramTotalGb.toFixed(1)} GB</span
+											>
 										</span>
 									</div>
-									<div class="h-2 w-full overflow-hidden rounded-full bg-muted">
+
+									<div
+										class="relative h-4 w-full overflow-hidden rounded-md bg-muted {vramBudget.overflow >
+										0
+											? 'ring-1 ring-red-500/60'
+											: ''}"
+									>
+										<div class="flex h-full w-full">
+											<div
+												class="h-full bg-primary transition-all"
+												style="width: {(vramBudget.weights / vramBudget.total) * 100}%"
+											></div>
+											<div
+												class="h-full bg-primary/60 transition-all"
+												style="width: {(vramBudget.kv / vramBudget.total) * 100}%"
+											></div>
+											<div
+												class="h-full bg-primary/30 transition-all"
+												style="width: {(vramBudget.overhead / vramBudget.total) * 100}%"
+											></div>
+											<div
+												class="h-full bg-muted-foreground/30 transition-all"
+												style="width: {(vramBudget.desktop / vramBudget.total) * 100}%"
+											></div>
+											<div class="h-full flex-1"></div>
+										</div>
+										<!-- 全层上卡线 -->
 										<div
-											class={'h-full transition-all ' +
-												(vramFitPercent > 90
-													? 'bg-red-500'
-													: vramFitPercent > 70
-														? 'bg-amber-500'
-														: 'bg-emerald-500')}
-											style="width: {Math.min(100, vramFitPercent)}%"
+											class="absolute top-0 bottom-0 w-px bg-foreground/70"
+											style="left: {Math.min(
+												100,
+												(vramBudget.modelNeed / vramBudget.total) * 100
+											)}%"
 										></div>
+									</div>
+
+									<div
+										class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground"
+									>
+										<span class="inline-flex items-center gap-1">
+											<span class="h-2 w-2 shrink-0 rounded-sm bg-primary"></span>
+											<span>Model Weights</span>
+											<span class="font-mono text-foreground"
+												>{vramBudget.weights.toFixed(2)}</span
+											>
+										</span>
+										<span class="inline-flex items-center gap-1">
+											<span class="h-2 w-2 shrink-0 rounded-sm bg-primary/60"></span>
+											<span>KV Cache</span>
+											<span class="font-mono text-foreground">{vramBudget.kv.toFixed(2)}</span>
+										</span>
+										<span class="inline-flex items-center gap-1">
+											<span class="h-2 w-2 shrink-0 rounded-sm bg-primary/30"></span>
+											<span>Buffers &amp; overhead</span>
+											<span class="font-mono text-foreground"
+												>{vramBudget.overhead.toFixed(2)}</span
+											>
+										</span>
+										<span class="inline-flex items-center gap-1">
+											<span class="h-2 w-2 shrink-0 rounded-sm bg-muted-foreground/40"></span>
+											<span>Desktop &amp; other apps</span>
+											<span class="font-mono text-foreground"
+												>{vramBudget.desktop.toFixed(2)}</span
+											>
+										</span>
+										<span class="inline-flex items-center gap-1">
+											<span class="h-3 w-px shrink-0 bg-foreground/70"></span>
+											<span>All layers on GPU</span>
+										</span>
+										{#if vramBudget.overflow > 0}
+											<span class="inline-flex items-center gap-1 text-red-500">
+												<span>Over capacity</span>
+												<span class="font-mono">{vramBudget.overflow.toFixed(2)}</span>
+												<span>GB</span>
+											</span>
+										{/if}
 									</div>
 								</div>
 							{/if}

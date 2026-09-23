@@ -54,6 +54,7 @@ tools\
 | `shot_dropdowns_r5.mjs` | **下拉统一样式复核出图**（不做断言，产出 `diag/shots-20260923-dropdowns/`）：① 设置页「主题」下拉（标杆）；② 设置页「语言」下拉（本轮从原生 `<select>` 并回自绘 `Select`）；③ 备份管理整页；④ 性能页取值下拉。定位方式：设置页组合框只有 主题/语言两个，按 `button[role=combobox]` 的 **nth(0)/nth(1)** 点。 |
 | `shot_perf_dropdowns_r5.mjs` | 性能页「方案选择」「KV 精度」下拉的出图（本轮 `DropdownMenu+RadioGroup` → `Select`）。先 `console.log` 出本页全部 combobox 文本（应为 `["5 分钟","均衡 32K","f16"]`），再按文本正则挑出方案/KV 那个点开截图。 |
 | `idle_dropdown_probe.mjs` | **「空闲卸载」下拉定点诊断**：触发器 class/`data-state`、箭头 `rotate`、弹出面板真实圆角/背景/层级链。怀疑「下拉 UI 还是系统组件」时先跑它。 |
+| `shot_b_l3_vram_bar.mjs` | **B-L3 显存预算条出图 + 中文图例断言**（产出 `diag/shots-20260923-bL3/`）：点一个模型行（只设 `focusedPath`、**不加载**）→ 等「加载后预测显存占用」卡片里的五段堆叠条渲染 → 对整张卡片元素级截图，并断言 6 条中文图例（模型权重/KV 缓存/缓冲与开销/桌面与其他程序/全层上卡线/显存预算）是否已被 overlay 命中。<br>依赖 **8080 哨兵 + 8090 manager**（要真实 `models`/`system-metrics`/`gpu-cleanup` 数据，否则 `vramBudget` 为 null 不出条）。⚠️ 输出目录是相对路径 → **必须从仓库根跑**（`cd D:\llama`），从 `tools/ui` 跑会把图落到 `tools/ui/diag/`。 |
 | `mock_webui_server.py` | 没有后端时起一个假 `:8080`，用来单独验 UI（静态目录写死 `D:\llama\webui`）。 |
 | `start_for_ui.py` | 起一个测试用模型实例（给 UI 验证提供数据源），用完自动空闲卸载。 |
 
