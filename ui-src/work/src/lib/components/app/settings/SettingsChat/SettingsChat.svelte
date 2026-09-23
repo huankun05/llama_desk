@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { RefreshCw } from '@lucide/svelte';
+	import CollapsibleSection from '$lib/components/app/misc/CollapsibleSection.svelte';
 	import {
 		SettingsChatBackupTab,
 		SettingsChatDesktopSidebar,
@@ -34,6 +35,9 @@
 	}
 
 	let { initialSection }: Props = $props();
+
+	/** 设置页各分区面板的折叠状态存哪一份（与性能页/参数页各存各的） */
+	const LS_SECTIONS = 'webui.settings.sections';
 
 	let activeSlug = $derived(initialSection ?? 'general');
 
@@ -163,42 +167,55 @@
 
 		<div class="mx-auto max-w-2xl px-4 flex-1 md:mt-4">
 			<div class="space-y-6 pt-3">
-				<div class="grid">
-					{#if currentSection.slug === SETTINGS_SECTION_SLUGS.TOOLS}
-						<SettingsChatToolsTab />
-					{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.MCP_SERVERS}
-						<!--
-							MCP 服务器管理原本只能从聊天表单里的一个小按钮弹出浮窗，
-							设置页里根本看不到入口。这里直接复用现成组件作为一整栏 ——
-							它本来就是按「整栏/整页」排版的（卡片列表 + 空态居中）。
-						-->
-						<div class="flex min-h-[26rem] flex-col">
-							<SettingsMcpServers />
-						</div>
-					{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.IMPORT_EXPORT}
-						<SettingsChatImportExportTab />
-					{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.BACKUP}
-						<SettingsChatBackupTab />
-					{:else if currentSection.fields}
-						<div class="space-y-6">
-							<SettingsChatFields
-								fields={currentSection.fields}
-								{localConfig}
-								onConfigChange={handleConfigChange}
-								onThemeChange={handleThemeChange}
-							/>
+				<!--
+					分区面板：标题 + 可折叠。左侧子导航负责"切到哪一节"，这里是"这一节的内容"，
+					长字段列表可以整块收起（和性能页/参数页用同一个组件、同一套交互）。
+					⚠️ 必须 `{#key}` —— CollapsibleSection 的折叠状态在初始化时读一次 localStorage，
+					不重建的话切换分区时会沿用上一节的状态、也不会读新 id 的记录。
+				-->
+				{#key currentSection.slug}
+					<CollapsibleSection
+						icon={currentSection.icon}
+						id={currentSection.slug}
+						storageKey={LS_SECTIONS}
+						title={currentSection.title}
+					>
+						{#if currentSection.slug === SETTINGS_SECTION_SLUGS.TOOLS}
+							<SettingsChatToolsTab />
+						{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.MCP_SERVERS}
+							<!--
+								MCP 服务器管理原本只能从聊天表单里的一个小按钮弹出浮窗，
+								设置页里根本看不到入口。这里直接复用现成组件作为一整栏 ——
+								它本来就是按「整栏/整页」排版的（卡片列表 + 空态居中）。
+							-->
+							<div class="flex min-h-[26rem] flex-col">
+								<SettingsMcpServers />
+							</div>
+						{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.IMPORT_EXPORT}
+							<SettingsChatImportExportTab />
+						{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.BACKUP}
+							<SettingsChatBackupTab />
+						{:else if currentSection.fields}
+							<div class="space-y-6">
+								<SettingsChatFields
+									fields={currentSection.fields}
+									{localConfig}
+									onConfigChange={handleConfigChange}
+									onThemeChange={handleThemeChange}
+								/>
 
-							{#if currentSection.slug === SETTINGS_SECTION_SLUGS.GENERAL}
-								<div class="flex justify-end">
-									<Button onclick={() => window.location.reload()} variant="outline">
-										<RefreshCw class="h-3 w-3" />
-										Reload app
-									</Button>
-								</div>
-							{/if}
-						</div>
-					{/if}
-				</div>
+								{#if currentSection.slug === SETTINGS_SECTION_SLUGS.GENERAL}
+									<div class="flex justify-end">
+										<Button onclick={() => window.location.reload()} variant="outline">
+											<RefreshCw class="h-3 w-3" />
+											Reload app
+										</Button>
+									</div>
+								{/if}
+							</div>
+						{/if}
+					</CollapsibleSection>
+				{/key}
 
 				<div class="mt-8 border-t border-border/30 pt-6">
 					<p class="text-xs text-muted-foreground">Settings are saved in browser's localStorage</p>

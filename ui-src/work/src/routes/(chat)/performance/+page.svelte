@@ -19,15 +19,23 @@
 		Save,
 		Search,
 		Server,
+		Settings2,
 		SlidersHorizontal,
 		Trash2,
 		TriangleAlert,
 		X
 	} from '@lucide/svelte';
+	import { CollapsibleSection, SettingsChatFields } from '$lib/components/app';
 	import { Button } from '$lib/components/ui/button';
 	import * as AlertDialog from '$lib/components/ui/alert-dialog';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-	import { API_SLOTS, APP_NAME, ROUTES, SETTINGS_KEYS } from '$lib/constants';
+	import {
+		API_SLOTS,
+		APP_NAME,
+		SETTINGS_KEYS,
+		SETTINGS_REGISTRY,
+		SETTINGS_SECTION_SLUGS
+	} from '$lib/constants';
 	import { ManagerError, ManagerService } from '$lib/services';
 	import type {
 		ManagerFitPlan,
@@ -38,7 +46,7 @@
 		ManagerSystemMetrics
 	} from '$lib/services';
 	import {
-		clampConfigForModel,
+		DEFAULT_LAUNCH_CONFIG,
 		estimateVram,
 		idleTtlSeconds,
 		KvCacheStore,
@@ -107,38 +115,9 @@
 	}
 
 	// ===== 分区折叠 =====
-	// 五块主标题都能折叠；状态写进 localStorage，下次打开页面还是上次的样子。
-	// 只记「哪些是折叠的」——默认全展开，所以新增分区不用迁移旧数据。
+	// 折叠逻辑本身在 `<CollapsibleSection>` 里（性能页 / 参数页 / 设置页共用一份实现），
+	// 这里只提供「本页的状态存哪一份」的 localStorage 键。
 	const LS_SECTIONS = 'webui.perf.sections';
-	const SEC_IDS = ['resources', 'server', 'switcher', 'setup', 'disk', 'cleanup'];
-	let collapsed = $state<Record<string, boolean>>({});
-
-	function loadSections() {
-		try {
-			const raw = localStorage.getItem(LS_SECTIONS);
-			if (!raw) return;
-
-			const parsed = JSON.parse(raw) as unknown;
-			if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
-
-			const clean: Record<string, boolean> = {};
-			for (const id of SEC_IDS) {
-				if ((parsed as Record<string, unknown>)[id] === true) clean[id] = true;
-			}
-			collapsed = clean;
-		} catch {
-			/* 存储损坏时按「全部展开」处理，不阻断页面 */
-		}
-	}
-
-	function toggleSection(id: string) {
-		collapsed = { ...collapsed, [id]: !collapsed[id] };
-		try {
-			localStorage.setItem(LS_SECTIONS, JSON.stringify(collapsed));
-		} catch {
-			/* 隐私模式写不进去，本次会话照样能折叠 */
-		}
-	}
 
 	// ===== 在资源管理器里打开目录（交给 manager.py 执行）=====
 	let openErr = $state('');
@@ -416,7 +395,6 @@
 	}
 	onMount(() => {
 		cores = navigator.hardwareConcurrency || 0;
-		loadSections();
 		loadTtl();
 		loadKvMeasured();
 		// 直接刷新/直达本页时 serverStore 可能还没拉过 /props，
@@ -919,18 +897,7 @@
 	});
 
 	const targetCfg = $derived.by(() => (targetModel ? configFor(targetModel) : null));
-	const targetOverride = $derived.by(() =>
-		targetModel ? launchPresetsStore.overrideFor(targetModel) : undefined
-	);
 	const targetCustom = $derived(isCustomized(targetModel));
-
-	// 用来提示「方案原值 → 被夹住后的值」
-	const baseCtx = $derived(
-		targetOverride?.ctx ?? launchPresetsStore.activePresetFor(targetModel)?.config.ctx ?? targetCfg?.ctx ?? 0
-	);
-	const baseCtk = $derived(
-		targetOverride?.ctk ?? launchPresetsStore.activePresetFor(targetModel)?.config.ctk ?? targetCfg?.ctk ?? 'f16'
-	);
 
 	// ===== 该模型的方案（全局方案 + 它自己命名保存的）=====
 	const targetOwnPresets = $derived(targetModel ? launchPresetsStore.ownPresetsFor(targetModel) : []);
@@ -1080,33 +1047,93 @@
 		maybePromptRestart(targetModel);
 	}
 
-	// ===== 每模型参数（写进 launchPresetsStore 的按模型覆盖）=====
+	// ===== 表单写入的唯一出口：按「编辑对象」决定写进哪一层 =====
+	/*
+		这个表单同时服务两个对象（2026-09-23 用户要求把两处启动参数合成一页）：
 
-	/** 上下文：先夹到模型训练长度再存，保证输入框显示值与实际存的值一致 */
-	function setModelCtx(m: ManagerModel, raw: number) {
-		if (!Number.isFinite(raw)) return;
+		- 「仅本模型」  → 写进该模型的覆盖，只影响这一个模型
+		- 「方案默认值」→ 写进该模型此刻生效的那份方案，所有引用它的模型一起变
 
-		const clamped = clampConfigForModel(m, { ...configFor(m), ctx: raw }).ctx;
+		好处是不必为了改方案参数跳到参数页，也不用把同样的字段排两遍 ——
+		同一份表单、两套数据源，字段定义只有一处。
+	*/
+	/** 表单在编辑哪一层：模型覆盖 / 方案本身 */
+	let editTarget = $state<'model' | 'preset'>('model');
 
-		launchPresetsStore.patchOverride(m, { ctx: clamped });
+	/**
+	 * 表单显示的当前值。
+	 *
+	 * 编辑方案时用**方案原值**（不含模型覆盖，也不做模型级夹取）—— 否则会出现
+	 * "界面显示 32K、实际存进方案的是被这个模型夹过的 8K"。
+	 * 兜底成默认配置是为了让它恒非 null，模板里就不必到处判空。
+	 */
+	const editCfg = $derived.by((): LaunchConfig => {
+		if (editTarget === 'preset') return targetActivePreset?.config ?? DEFAULT_LAUNCH_CONFIG;
+
+		return targetCfg ?? DEFAULT_LAUNCH_CONFIG;
+	});
+
+	/**
+	 * 方案改动会影响所有引用它的模型；若端口上正在跑的那个也用这份方案，同样要问一句重启。
+	 * （`maybePromptRestart` 只管目标模型，这里不能直接复用。）
+	 */
+	function promptRestartForPreset(presetId: string) {
+		const lm = loadedModel;
+
+		if (!lm || launchPresetsStore.activePresetFor(lm)?.id !== presetId) return;
+
+		restartPrompt = { cfg: { ...configFor(lm) }, model: lm };
+	}
+
+	/**
+	 * 表单写入的唯一出口。
+	 *
+	 * 为什么 ctx 要分两种夹取：写模型覆盖时可以按这个模型的训练长度收紧；
+	 * 写方案时**不能** —— 方案是多个模型共用的模板，拿 A 模型的 ctx_train 去夹，
+	 * 会把本来给别的模型准备的 32K 悄悄改成 A 的上限。
+	 */
+	function patchEdit(patch: Partial<LaunchConfig>) {
+		if (editTarget === 'preset') {
+			const p = targetActivePreset;
+			if (!p) return;
+
+			const next: Partial<LaunchConfig> = { ...patch };
+			if (next.ctx != null) next.ctx = Math.max(2048, Math.floor(next.ctx));
+
+			launchPresetsStore.patchPreset(p.id, next);
+			promptRestartForPreset(p.id);
+			return;
+		}
+
+		const m = targetModel;
+		if (!m) return;
+
+		launchPresetsStore.patchOverride(m, patch);
 		maybePromptRestart(m);
 	}
 
-	function setModelCtk(m: ManagerModel, v: string) {
-		launchPresetsStore.patchOverride(m, { ctk: v, ctv: v });
-		maybePromptRestart(m);
+	/** 上下文：先夹到合法范围（写模型覆盖时再夹到模型训练长度） */
+	function onCtx(raw: number) {
+		if (!Number.isFinite(raw)) return;
+
+		const v = Math.max(2048, Math.floor(raw));
+		const m = targetModel;
+
+		patchEdit({ ctx: editTarget === 'model' && m?.ctx_train ? Math.min(v, m.ctx_train) : v });
 	}
 
-	function setModelNgl(m: ManagerModel, raw: number) {
-		if (!Number.isFinite(raw)) return;
-		launchPresetsStore.patchOverride(m, { ngl: Math.max(0, Math.floor(raw)) });
-		maybePromptRestart(m);
+	function onCtk(v: string) {
+		patchEdit({ ctk: v, ctv: v });
 	}
 
-	function setModelNp(m: ManagerModel, raw: number) {
+	function onNgl(raw: number) {
 		if (!Number.isFinite(raw)) return;
-		launchPresetsStore.patchOverride(m, { np: Math.max(1, Math.floor(raw)) });
-		maybePromptRestart(m);
+		patchEdit({ ngl: Math.max(0, Math.floor(raw)) });
+	}
+
+	function onNp(raw: number) {
+		if (!Number.isFinite(raw)) return;
+		patchEdit({ np: Math.max(1, Math.floor(raw)) });
 	}
 
 	/*
@@ -1114,33 +1141,116 @@
 		实际上只能存这四项 —— 线程数、batch/ubatch、Flash Attention 只能靠全局方案，
 		用户看到的现象就是"方案好像只保存了上下文长度"。下面四个补上，9 个字段全可调。
 	*/
-	function setModelThreads(m: ManagerModel, raw: number) {
+	function onThreads(raw: number) {
 		if (!Number.isFinite(raw)) return;
-		launchPresetsStore.patchOverride(m, { threads: Math.max(1, Math.floor(raw)) });
-		maybePromptRestart(m);
+		patchEdit({ threads: Math.max(1, Math.floor(raw)) });
 	}
 
 	/** batch 必须 ≥ ubatch（否则 llama.cpp 直接报错退出），所以联动夹一下 */
-	function setModelBatch(m: ManagerModel, raw: number) {
+	function onBatch(raw: number) {
 		if (!Number.isFinite(raw)) return;
+
 		const b = Math.max(32, Math.floor(raw));
-		launchPresetsStore.patchOverride(m, {
-			batch: b,
-			ubatch: Math.min(configFor(m).ubatch, b)
-		});
-		maybePromptRestart(m);
+
+		patchEdit({ batch: b, ubatch: Math.min(editCfg.ubatch, b) });
 	}
 
-	function setModelUbatch(m: ManagerModel, raw: number) {
+	function onUbatch(raw: number) {
 		if (!Number.isFinite(raw)) return;
+
 		const ub = Math.max(16, Math.floor(raw));
-		launchPresetsStore.patchOverride(m, { ubatch: Math.min(ub, configFor(m).batch) });
-		maybePromptRestart(m);
+
+		patchEdit({ ubatch: Math.min(ub, editCfg.batch) });
 	}
 
-	function setModelFlashAttn(m: ManagerModel, v: boolean) {
-		launchPresetsStore.patchOverride(m, { flash_attn: v });
-		maybePromptRestart(m);
+	function onFlashAttn(v: boolean) {
+		patchEdit({ flash_attn: v });
+	}
+
+	// ===== 通用方案库的增删改（标题栏「管理方案 ⋯」）=====
+	/*
+		这一组只管**全局方案**（`presets`）。模型自己保存的那份方案由左侧卡片的
+		Save as preset / Rename / Overwrite / Delete 负责，两边职责不重叠。
+	*/
+	let renamePresetId = $state('');
+	let renamePresetName = $state('');
+
+	/** 只有本模型跟的是通用方案时，才谈得上改名/删除通用方案 */
+	const editingGlobalPreset = $derived(!targetOwnPresetId);
+
+	/** 拿当前表单的参数新建一份**通用**方案，并让本模型使用它 */
+	function menuNewPreset() {
+		const m = targetModel;
+		const suggested = `${Math.round((editCfg?.ctx ?? 32768) / 1024)}K · KV ${editCfg?.ctk ?? 'f16'}`;
+		const name = window.prompt('New preset name', suggested);
+
+		if (name === null) return;
+
+		const p = launchPresetsStore.create(name, editCfg ?? undefined);
+
+		if (m) launchPresetsStore.selectForModel(m, p.id);
+	}
+
+	function menuRenamePreset() {
+		if (!editingGlobalPreset) return;
+
+		renamePresetId = launchPresetsStore.activeId;
+		renamePresetName = launchPresetsStore.active?.name ?? '';
+		showSavePreset = false;
+	}
+
+	function doMenuRenamePreset() {
+		launchPresetsStore.rename(renamePresetId, renamePresetName);
+		renamePresetId = '';
+		renamePresetName = '';
+	}
+
+	function menuDeletePreset() {
+		if (!editingGlobalPreset) return;
+
+		if (launchPresetsStore.presets.length <= 1) {
+			toast.error('At least one preset must remain.');
+			return;
+		}
+
+		const p = launchPresetsStore.active;
+
+		if (!window.confirm(`Delete preset "${p.name}"?`)) return;
+
+		launchPresetsStore.remove(p.id);
+	}
+
+	function menuRestoreBuiltins() {
+		if (
+			!window.confirm(
+				'Restore the built-in presets? Your own presets are kept, built-in ones are reset.'
+			)
+		)
+			return;
+
+		launchPresetsStore.restoreBuiltins();
+	}
+
+	// ===== 本页自己的显示设置 =====
+	/*
+		这三项管的不是"应用偏好"，而是**性能页自己怎么显示**（GPU 卡片 / 预测显存块 / 刷新频率）。
+		以前挂在设置页的「性能」节，要改得先跳到设置页 —— 和"每个功能一个归属页"相悖，
+		所以随设置页的「性能」节一起搬来这里（字段定义仍留在 SETTINGS_REGISTRY，
+		默认值与校验元数据由它派生）。
+	*/
+	const perfSection = SETTINGS_REGISTRY.find(
+		(s) => s.slug === SETTINGS_SECTION_SLUGS.PERFORMANCE
+	);
+	const displayFields = $derived(perfSection?.settings ?? []);
+
+	let localConfig = $state<Record<string, unknown>>({});
+	$effect(() => {
+		localConfig = { ...settingsStore.config } as Record<string, unknown>;
+	});
+
+	function handleConfigChange(key: string, value: string | boolean) {
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		settingsStore.updateConfig(key as any, value as any);
 	}
 
 	// ===== 显存清理（管理器之外的 llama-server 也在这里收掉）=====
@@ -1405,28 +1515,6 @@
 	<title>Model &amp; Performance · {APP_NAME}</title>
 </svelte:head>
 
-<!--
-	可折叠的主标题：点一下收起/展开整块，状态记在 localStorage。
-	抽成 snippet 是为了五块标题长得完全一样（小三角 + 图标 + 文字），
-	图标由调用处传入，标题文字保持英文原文交给 overlay 翻译。
--->
-{#snippet secHead(id: string, title: string, Icon: typeof MemoryStick)}
-	<button
-		aria-expanded={!collapsed[id]}
-		class="flex items-center gap-2 text-left hover:text-primary"
-		onclick={() => toggleSection(id)}
-		type="button"
-	>
-		<ChevronDown
-			class="h-4 w-4 shrink-0 text-muted-foreground transition-transform {collapsed[id]
-				? '-rotate-90'
-				: ''}"
-		/>
-		<Icon class="h-4 w-4 shrink-0 text-primary" />
-		<span>{title}</span>
-	</button>
-{/snippet}
-
 <div class="mx-auto max-w-6xl px-4 py-8">
 	<header class="mb-6 flex items-center gap-3">
 		<Gauge class="h-7 w-7 text-primary" />
@@ -1475,511 +1563,518 @@
 	{/if}
 
 	<!-- ===== 本地资源：三格铺满，不再让右列被长卡片拖成长短腿 ===== -->
-	<section class="mb-6">
-		<h2 class="mb-3 flex items-center gap-2 text-base font-semibold">
-			{@render secHead('resources', 'Real-time Local Resources', MemoryStick)}
-		</h2>
-		{#if !collapsed.resources}
-			{#if !sys}
-				<div
-					class="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground shadow-sm"
-				>
-					Loading…
-				</div>
-			{:else}
-				<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-					<!-- CPU -->
-					<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
-						<div class="mb-2 flex items-center gap-2">
-							<Cpu class="h-4 w-4 text-sky-500" />
-							<h3 class="text-sm font-semibold">CPU</h3>
-							<span class="ml-auto font-mono text-sm">{num(sys.cpu_percent, '%', 1)}</span>
-						</div>
-						<div class="h-2 w-full overflow-hidden rounded-full bg-muted">
-							<div
-								class="h-full {BAR_CPU} transition-all"
-								style="width: {Math.min(100, sys.cpu_percent ?? 0)}%"
-							></div>
-						</div>
+	<!-- ===== 本地资源：三格铺满，不再让右列被长卡片拖成长短腿 ===== -->
+	<CollapsibleSection
+		id="resources"
+		icon={MemoryStick}
+		storageKey={LS_SECTIONS}
+		title="Real-time Local Resources"
+	>
+		{#if !sys}
+			<div
+				class="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground shadow-sm"
+			>
+				Loading…
+			</div>
+		{:else}
+			<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+				<!-- CPU -->
+				<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
+					<div class="mb-2 flex items-center gap-2">
+						<Cpu class="h-4 w-4 text-sky-500" />
+						<h3 class="text-sm font-semibold">CPU</h3>
+						<span class="ml-auto font-mono text-sm">{num(sys.cpu_percent, '%', 1)}</span>
+					</div>
+					<div class="h-2 w-full overflow-hidden rounded-full bg-muted">
+						<div
+							class="h-full {BAR_CPU} transition-all"
+							style="width: {Math.min(100, sys.cpu_percent ?? 0)}%"
+						></div>
+					</div>
+					<div class="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+						<!-- 标签单独一个静态文本节点，overlay 才能整节点命中翻译 -->
+						<span>Cores / Threads</span>
+						<span class="font-mono">{cpuCoreLabel}</span>
+					</div>
+					{#if sys.cpu_name}
 						<div class="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-							<!-- 标签单独一个静态文本节点，overlay 才能整节点命中翻译 -->
-							<span>Cores / Threads</span>
-							<span class="font-mono">{cpuCoreLabel}</span>
-						</div>
-						{#if sys.cpu_name}
-							<div class="mt-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-								<span class="truncate" style="max-width: 11rem" title={sys.cpu_name}>{sys.cpu_name}</span>
-								{#if cpuClockLabel}<span class="font-mono">{cpuClockLabel}</span>{/if}
-							</div>
-						{/if}
-					</div>
-
-					<!-- RAM -->
-					<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
-						<div class="mb-2 flex items-center gap-2">
-							<MemoryStick class="h-4 w-4 text-violet-500" />
-							<h3 class="text-sm font-semibold">RAM</h3>
-							<span class="ml-auto font-mono text-sm"
-								>{num(sys.ram_used_gb, ' / ')}{num(sys.ram_total_gb, ' GB')}</span
-							>
-						</div>
-						<div class="h-2 w-full overflow-hidden rounded-full bg-muted">
-							<div
-								class="h-full {BAR_RAM} transition-all"
-								style="width: {Math.min(100, ((sys.ram_used_gb ?? 0) / (sys.ram_total_gb || 1)) * 100)}%"
-							></div>
-						</div>
-					</div>
-
-					{#if showGpu}
-						<!-- GPU -->
-						<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
-							<div class="mb-2 flex items-center gap-2">
-								<Gauge class="h-4 w-4 text-emerald-500" />
-								<h3 class="text-sm font-semibold">
-									GPU{#if sys.gpu_temp != null}
-										<span class="text-xs text-muted-foreground"> · {sys.gpu_temp.toFixed(0)}°C</span>
-									{/if}
-								</h3>
-								<span class="ml-auto font-mono text-sm">{num(sys.gpu_util, '%', 1)}</span>
-							</div>
-							<div class="h-2 w-full overflow-hidden rounded-full bg-muted">
-								<div
-									class="h-full {BAR_GPU} transition-all"
-									style="width: {Math.min(100, ((sys.vram_used_gb ?? 0) / (sys.vram_total_gb || 1)) * 100)}%"
-								></div>
-							</div>
-							<div class="mt-1 flex justify-between text-xs text-muted-foreground">
-								<span>VRAM {num(sys.vram_used_gb, ' / ')}{num(sys.vram_total_gb, ' GB')}</span>
-								{#if sys.gpu_name}<span class="truncate" style="max-width: 10rem">{sys.gpu_name}</span>{/if}
-							</div>
+							<span class="truncate" style="max-width: 11rem" title={sys.cpu_name}>{sys.cpu_name}</span>
+							{#if cpuClockLabel}<span class="font-mono">{cpuClockLabel}</span>{/if}
 						</div>
 					{/if}
 				</div>
-			{/if}
+
+				<!-- RAM -->
+				<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
+					<div class="mb-2 flex items-center gap-2">
+						<MemoryStick class="h-4 w-4 text-violet-500" />
+						<h3 class="text-sm font-semibold">RAM</h3>
+						<span class="ml-auto font-mono text-sm"
+							>{num(sys.ram_used_gb, ' / ')}{num(sys.ram_total_gb, ' GB')}</span
+						>
+					</div>
+					<div class="h-2 w-full overflow-hidden rounded-full bg-muted">
+						<div
+							class="h-full {BAR_RAM} transition-all"
+							style="width: {Math.min(100, ((sys.ram_used_gb ?? 0) / (sys.ram_total_gb || 1)) * 100)}%"
+						></div>
+					</div>
+				</div>
+
+				{#if showGpu}
+					<!-- GPU -->
+					<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
+						<div class="mb-2 flex items-center gap-2">
+							<Gauge class="h-4 w-4 text-emerald-500" />
+							<h3 class="text-sm font-semibold">
+								GPU{#if sys.gpu_temp != null}
+									<span class="text-xs text-muted-foreground"> · {sys.gpu_temp.toFixed(0)}°C</span>
+								{/if}
+							</h3>
+							<span class="ml-auto font-mono text-sm">{num(sys.gpu_util, '%', 1)}</span>
+						</div>
+						<div class="h-2 w-full overflow-hidden rounded-full bg-muted">
+							<div
+								class="h-full {BAR_GPU} transition-all"
+								style="width: {Math.min(100, ((sys.vram_used_gb ?? 0) / (sys.vram_total_gb || 1)) * 100)}%"
+							></div>
+						</div>
+						<div class="mt-1 flex justify-between text-xs text-muted-foreground">
+							<span>VRAM {num(sys.vram_used_gb, ' / ')}{num(sys.vram_total_gb, ' GB')}</span>
+							{#if sys.gpu_name}<span class="truncate" style="max-width: 10rem">{sys.gpu_name}</span>{/if}
+						</div>
+					</div>
+				{/if}
+			</div>
 		{/if}
-	</section>
+	</CollapsibleSection>
 
 	<!-- ===== 显存清理：管理器管不到的 llama-server 也在这里收掉 ===== -->
-	<section class="mb-6">
-		<h2 class="mb-3 flex items-center gap-2 text-base font-semibold">
-			{@render secHead('cleanup', 'VRAM cleanup', Trash2)}
-		</h2>
-		{#if !collapsed.cleanup}
-			<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
-				<div class="flex flex-wrap items-start gap-2">
-					<p class="text-xs text-muted-foreground" style="max-width: 48rem">
-						<span>The manager only knows about the instances it started itself.</span>
-						<span>
-							A llama-server launched by the desktop shell, a .bat file or a script never
-							shows up in the instance list - and it keeps holding VRAM until you stop it
-							here.
-						</span>
-						<span>
-							Processes started by another app (Ollama, Docker, ...) are listed too, but
-							this panel never stops them.
-						</span>
-					</p>
-					{#if cleanupReport?.gpu.used_mib != null}
-						<span class="ml-auto whitespace-nowrap font-mono text-xs text-muted-foreground">
-							VRAM {num(cleanupReport.gpu.used_mib, ' / ')}{num(cleanupReport.gpu.total_mib, ' MiB')}
-						</span>
-					{/if}
-				</div>
-
-				{#if cleanupError}
-					<p
-						class="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-500"
-					>
-						{cleanupError}
-					</p>
+	<!-- ===== 显存清理：管理器管不到的 llama-server 也在这里收掉 ===== -->
+	<CollapsibleSection
+		id="cleanup"
+		icon={Trash2}
+		storageKey={LS_SECTIONS}
+		title="VRAM cleanup"
+	>
+		<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
+			<div class="flex flex-wrap items-start gap-2">
+				<p class="text-xs text-muted-foreground" style="max-width: 48rem">
+					<span>The manager only knows about the instances it started itself.</span>
+					<span>
+						A llama-server launched by the desktop shell, a .bat file or a script never
+						shows up in the instance list - and it keeps holding VRAM until you stop it
+						here.
+					</span>
+					<span>
+						Processes started by another app (Ollama, Docker, ...) are listed too, but
+						this panel never stops them.
+					</span>
+				</p>
+				{#if cleanupReport?.gpu.used_mib != null}
+					<span class="ml-auto whitespace-nowrap font-mono text-xs text-muted-foreground">
+						VRAM {num(cleanupReport.gpu.used_mib, ' / ')}{num(cleanupReport.gpu.total_mib, ' MiB')}
+					</span>
 				{/if}
+			</div>
 
-				{#if cleanupReport}
-					{#if cleanupReport.processes.length === 0}
-						<p class="mt-3 text-xs text-muted-foreground">
-							<span>No llama-server is running right now, so nothing is holding VRAM.</span>
-						</p>
-					{:else}
-						<ul class="mt-3 flex flex-col gap-2">
-							{#each cleanupReport.processes as p (p.pid)}
-								<!--
-									isForeign = 明确是别的程序的进程，**或者**当前管理器还没能力区分
-									（旧 manager：exe/启动参数一概不看，`own_exe` 字段也不存在）
-									→ 只要不是"能确认是我们自己的残留"，一律当别的程序处理、不给卸载入口。
-								-->
-								{@const isForeign =
-									p.kind === 'foreign' || (p.kind === 'orphan' && !cleanupTrusted)}
-								<li
-									class="flex flex-wrap items-center gap-2 rounded-md border border-border/60 px-2 py-1.5 text-xs"
-								>
-									<span class="font-mono">pid {p.pid}</span>
-									{#if p.port}
-										<span class="rounded border border-border px-1 font-mono">:{p.port}</span>
-									{/if}
-									<span class="truncate" style="max-width: 15rem" title={p.model ?? ''}>
-										{p.alias ?? p.model ?? '—'}
-									</span>
-									{#if p.vram_mib != null}
-										<span class="font-mono text-muted-foreground">{num(p.vram_mib, ' MiB')}</span>
-									{/if}
-									{#if p.kind === 'managed'}
-										<span class="rounded bg-primary/15 px-1.5 py-0.5 text-primary">
-											<span>managed</span>
-										</span>
-									{:else if p.kind === 'active'}
-										<span class="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-500">
-											<span>in use</span>
-										</span>
-									{:else if isForeign}
-										<!--
-											**别的程序**在用的 llama-server。两种都算：
-											① 别的程序装的那份 exe（本机实测：Ollama 的模型 runner、
-											   Docker Desktop 的 Model Runner）；
-											② 别人拿着我们这份 exe 起的（本机实测：用户自己的 OCR 项目
-											   用 --model … Hy-MT2-1.8B … --jinja 起的翻译实例）。
-											**一律不给卸载入口** —— 要卸应该去那个程序里卸，本面板不替他做决定。
-										-->
-										<span
-											class="rounded bg-sky-500/15 px-1.5 py-0.5 text-sky-600 dark:text-sky-400"
-											title={p.exe ?? ''}
-										>
-											<span>other app</span>
-										</span>
-										{#if p.source}
-											<span class="rounded border border-border px-1 font-mono text-muted-foreground"
-												>{p.source}</span
-											>
-										{/if}
-									{:else}
-										<span class="rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-500">
-											<span>unmanaged</span>
-										</span>
-									{/if}
-									{#if isForeign}
-										<span class="ml-auto text-[11px] text-muted-foreground">
-											<span>started by another app - unload it there</span>
-										</span>
-									{:else}
-										<button
-											class="ml-auto rounded-md border border-border px-2 py-0.5 text-muted-foreground hover:bg-accent disabled:opacity-50"
-											disabled={cleanupBusy}
-											onclick={() => unloadPid(p.pid)}
-											title="Stop this process and release its VRAM"
-											type="button"
-										>
-											<span>Unload</span>
-										</button>
-									{/if}
-								</li>
-							{/each}
-						</ul>
-					{/if}
+			{#if cleanupError}
+				<p
+					class="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-500"
+				>
+					{cleanupError}
+				</p>
+			{/if}
 
-					<div class="mt-3 flex flex-wrap items-center gap-2">
-						<button
-							class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent disabled:opacity-50"
-							disabled={cleanupLoading || cleanupBusy}
-							onclick={() => void loadCleanup()}
-							type="button"
-						>
-							<RefreshCw class="h-3 w-3" />
-							<span>Rescan</span>
-						</button>
-						{#if cleanupReport.orphans.length > 0 && cleanupTrusted}
-							<button
-								class="inline-flex items-center gap-1 rounded-md border border-red-500/40 px-2 py-1 text-xs text-red-500 hover:bg-red-500/10 disabled:opacity-50"
-								disabled={cleanupBusy}
-								onclick={() => void runCleanup()}
-								type="button"
-							>
-								<Trash2 class="h-3 w-3" />
-								<span>Clean up unmanaged</span>
-								<span class="font-mono">{num(cleanupReport.reclaimable_mib, ' MiB')}</span>
-							</button>
-						{:else if !cleanupTrusted}
-							<!-- 过渡期：旧 manager 分不清"本应用的残留"和"别的程序用我们 exe 起的实例"，
-							     宁可先不给清理入口，也别让用户一键把别的程序的模型杀掉 -->
-							<span class="text-[11px] text-amber-600 dark:text-amber-500">
-								<span>
-									Restart the app to enable cleanup: the running manager cannot tell other
-									programs apart.
-								</span>
-							</span>
-						{/if}
-						<span class="text-[11px] text-muted-foreground" style="max-width: 34rem">
-							<span>
-								The cleanup button stops only leftovers of this app: the same llama-server.exe,
-								not in the instance list and not listening on the active port. Processes started
-								by other apps are never touched.
-							</span>
-						</span>
-					</div>
-
-					{#if cleanupReport.parked_aliases.length > 0}
-						<p class="mt-2 text-[11px] text-muted-foreground">
-							<span>Parked duplicate files waiting for the process to release them:</span>
-							<span class="font-mono">{cleanupReport.parked_aliases.length}</span>
-						</p>
-					{/if}
-					{#if cleanupReport.stale_instances.length > 0}
-						<p class="mt-2 text-[11px] text-muted-foreground">
-							<span>Records the manager still marks as running, but whose process is gone:</span>
-							<span class="font-mono">{cleanupReport.stale_instances.length}</span>
-						</p>
-					{/if}
-
-					{#if cleanupDone}
-						<p class="mt-2 flex flex-wrap items-center gap-1 text-xs text-emerald-500">
-							{#if cleanupDone.stopped === 0}
-								<span>Nothing was stopped.</span>
-								{#if cleanupDone.reason}
-									<span class="font-mono text-muted-foreground">{cleanupDone.reason}</span>
-								{/if}
-							{:else}
-								<span>Stopped processes:</span>
-								<span class="font-mono">{cleanupDone.stopped}</span>
-								{#if cleanupDone.freed != null && cleanupDone.freed > 0}
-									<span>· VRAM released:</span>
-									<span class="font-mono">{cleanupDone.freed} MiB</span>
-								{:else}
-									<span>· Windows may take a moment to return the VRAM.</span>
-								{/if}
-							{/if}
-						</p>
-					{/if}
-				{:else if cleanupLoading}
+			{#if cleanupReport}
+				{#if cleanupReport.processes.length === 0}
 					<p class="mt-3 text-xs text-muted-foreground">
-						<span>Scanning for llama-server processes...</span>
+						<span>No llama-server is running right now, so nothing is holding VRAM.</span>
 					</p>
+				{:else}
+					<ul class="mt-3 flex flex-col gap-2">
+						{#each cleanupReport.processes as p (p.pid)}
+							<!--
+								isForeign = 明确是别的程序的进程，**或者**当前管理器还没能力区分
+								（旧 manager：exe/启动参数一概不看，`own_exe` 字段也不存在）
+								→ 只要不是"能确认是我们自己的残留"，一律当别的程序处理、不给卸载入口。
+							-->
+							{@const isForeign =
+								p.kind === 'foreign' || (p.kind === 'orphan' && !cleanupTrusted)}
+							<li
+								class="flex flex-wrap items-center gap-2 rounded-md border border-border/60 px-2 py-1.5 text-xs"
+							>
+								<span class="font-mono">pid {p.pid}</span>
+								{#if p.port}
+									<span class="rounded border border-border px-1 font-mono">:{p.port}</span>
+								{/if}
+								<span class="truncate" style="max-width: 15rem" title={p.model ?? ''}>
+									{p.alias ?? p.model ?? '—'}
+								</span>
+								{#if p.vram_mib != null}
+									<span class="font-mono text-muted-foreground">{num(p.vram_mib, ' MiB')}</span>
+								{/if}
+								{#if p.kind === 'managed'}
+									<span class="rounded bg-primary/15 px-1.5 py-0.5 text-primary">
+										<span>managed</span>
+									</span>
+								{:else if p.kind === 'active'}
+									<span class="rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-500">
+										<span>in use</span>
+									</span>
+								{:else if isForeign}
+									<!--
+										**别的程序**在用的 llama-server。两种都算：
+										① 别的程序装的那份 exe（本机实测：Ollama 的模型 runner、
+										   Docker Desktop 的 Model Runner）；
+										② 别人拿着我们这份 exe 起的（本机实测：用户自己的 OCR 项目
+										   用 --model … Hy-MT2-1.8B … --jinja 起的翻译实例）。
+										**一律不给卸载入口** —— 要卸应该去那个程序里卸，本面板不替他做决定。
+									-->
+									<span
+										class="rounded bg-sky-500/15 px-1.5 py-0.5 text-sky-600 dark:text-sky-400"
+										title={p.exe ?? ''}
+									>
+										<span>other app</span>
+									</span>
+									{#if p.source}
+										<span class="rounded border border-border px-1 font-mono text-muted-foreground"
+											>{p.source}</span
+										>
+									{/if}
+								{:else}
+									<span class="rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-500">
+										<span>unmanaged</span>
+									</span>
+								{/if}
+								{#if isForeign}
+									<span class="ml-auto text-[11px] text-muted-foreground">
+										<span>started by another app - unload it there</span>
+									</span>
+								{:else}
+									<button
+										class="ml-auto rounded-md border border-border px-2 py-0.5 text-muted-foreground hover:bg-accent disabled:opacity-50"
+										disabled={cleanupBusy}
+										onclick={() => unloadPid(p.pid)}
+										title="Stop this process and release its VRAM"
+										type="button"
+									>
+										<span>Unload</span>
+									</button>
+								{/if}
+							</li>
+						{/each}
+					</ul>
 				{/if}
-			</div>
-		{/if}
-	</section>
 
-	<!-- ===== 服务器信息：服务端是谁、在跑什么、槽位在忙什么、别人怎么连进来 ===== -->
-	<section class="mb-6">
-		<h2 class="mb-3 flex items-center gap-2 text-base font-semibold">
-			{@render secHead('server', 'Server Info', Server)}
-		</h2>
-		{#if !collapsed.server}
-		<div class="grid gap-4 lg:grid-cols-3">
-				<!-- 当前模型 -->
-				<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
-					<div class="mb-2 flex items-center gap-2">
-						<Cpu class="h-4 w-4 text-muted-foreground" />
-						<h3 class="text-sm font-semibold">Current Model</h3>
-						<span class="ml-auto text-xs text-muted-foreground">/props</span>
-					</div>
-					{#if loadedModel}
-						<dl class="space-y-1 text-sm">
-							<div class="flex justify-between gap-3">
-								<dt class="text-muted-foreground">Name</dt>
-								<dd class="truncate font-mono">{loadedModel.name}</dd>
-							</div>
-							{#if loadedModel.size_gb > 0}
-								<div class="flex justify-between gap-3">
-									<dt class="text-muted-foreground">Size</dt>
-									<dd class="font-mono">{loadedModel.size_gb.toFixed(2)} GB</dd>
-								</div>
-							{/if}
-							{#if loadedModel.quant}
-								<div class="flex justify-between gap-3">
-									<dt class="text-muted-foreground">Quantization</dt>
-									<dd class="font-mono">{loadedModel.quant}</dd>
-								</div>
-							{/if}
-							{#if loadedModel.ctx_train}
-								<div class="flex justify-between gap-3">
-									<dt class="text-muted-foreground">Trained context</dt>
-									<dd class="font-mono">{loadedModel.ctx_train.toLocaleString()}</dd>
-								</div>
-							{/if}
-							{#if loadedModel.architecture}
-								<div class="flex justify-between gap-3">
-									<dt class="text-muted-foreground">Architecture</dt>
-									<dd class="font-mono">{loadedModel.architecture}</dd>
-								</div>
-							{/if}
-						</dl>
-						{#if loadedModel.path}
-							<p class="mt-2 truncate font-mono text-[11px] text-muted-foreground" title={loadedModel.path}>
-								{prettyPath(loadedModel.path)}
-							</p>
-						{/if}
-					{:else}
-						<p class="text-sm text-muted-foreground">No model loaded.</p>
-					{/if}
-				</div>
-
-				<!-- 服务端 -->
-				<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
-					<div class="mb-2 flex items-center gap-2">
-						<Activity class="h-4 w-4 text-muted-foreground" />
-						<h3 class="text-sm font-semibold">Server</h3>
-						<span class="ml-auto text-xs text-muted-foreground">llama-server :8080</span>
-					</div>
-					{#if serverProps}
-						<dl class="space-y-1 text-sm">
-							<div class="flex justify-between gap-3">
-								<dt class="text-muted-foreground">Build</dt>
-								<dd class="break-all text-right font-mono text-xs">{buildLabel}</dd>
-							</div>
-							{#if serverProps.total_slots != null}
-								<div class="flex justify-between gap-3">
-									<dt class="text-muted-foreground">Slots</dt>
-									<dd class="font-mono">{serverProps.total_slots}</dd>
-								</div>
-							{/if}
-							{#if serverProps.default_generation_settings?.n_ctx}
-								<div class="flex justify-between gap-3">
-									<dt class="text-muted-foreground">n_ctx</dt>
-									<dd class="font-mono">{serverProps.default_generation_settings.n_ctx}</dd>
-								</div>
-							{/if}
-							<div class="flex justify-between gap-3">
-								<dt class="text-muted-foreground">Modalities</dt>
-								<dd class="font-mono">{modalityLabel}</dd>
-							</div>
-						</dl>
-					{:else if serverStore.error}
-						<p class="text-sm text-muted-foreground">
-							<span>Server not reachable.</span>
-						</p>
-					{:else}
-						<p class="text-sm text-muted-foreground">Loading…</p>
-					{/if}
-				</div>
-
-				<!-- 槽位活动：空闲时没有速度数据，有请求时才出现 -->
-				<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
-					<div class="mb-2 flex items-center gap-2">
-						<Layers class="h-4 w-4 text-muted-foreground" />
-						<h3 class="text-sm font-semibold">Slot activity</h3>
-						<span class="ml-auto text-xs text-muted-foreground">/slots</span>
-					</div>
-					<!--
-						「槽位」是什么，写清楚：llama-server 的并发单元 = -np 的值。
-						每个槽位一份独立 KV 缓存，就是一个可以同时进行的会话；
-						总上下文（-c）按槽位数均分，所以这里的 n_ctx 是「每槽」的量，
-						「槽位」×「每槽 n_ctx」才是整个服务能吃下的上下文。
-					-->
-					<p class="mb-2 text-xs leading-relaxed text-muted-foreground">
-						<!-- 单行是刻意的：overlay 按「整节点归一化文本」命中，换行会变成空格，拆行容易漏配 -->
-						<span>One slot = one request the server can handle at a time. This server uses a unified KV pool (-kvu), so every slot draws from the same context shown below instead of getting a slice of it.</span>
-					</p>
-					{#if !slotsOk}
-						<p class="text-sm text-muted-foreground">
-							<span>Slots not available.</span>
-						</p>
-					{:else if slots.length === 0}
-						<p class="text-sm text-muted-foreground">
-							<span>No slots.</span>
-						</p>
-					{:else}
-						<ul class="space-y-1">
-							{#each slots as s (s.id)}
-								<li class="flex items-center gap-2 text-xs">
-									<span class="font-mono text-muted-foreground">#{s.id}</span>
-									{#if s.is_processing}
-										<span
-											class="inline-flex items-center gap-1 rounded-sm bg-emerald-500/15 px-1.5 py-px font-medium text-emerald-600"
-										>
-											<span class="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500"></span>
-											Processing
-										</span>
-									{:else}
-										<span class="text-muted-foreground">Idle</span>
-									{/if}
-									<span class="text-muted-foreground">ctx</span>
-									<span class="font-mono text-muted-foreground">{s.n_ctx.toLocaleString()}</span>
-									{#if s.prompt_per_second != null}
-										<span class="ml-auto font-mono"
-											>pp {s.prompt_per_second.toFixed(0)} <span>tokens/s</span></span
-										>
-									{/if}
-									{#if s.predicted_per_second != null}
-										<span class="font-mono {s.prompt_per_second == null ? 'ml-auto' : ''}"
-											>tg {s.predicted_per_second.toFixed(1)} <span>tokens/s</span></span
-										>
-									{/if}
-								</li>
-							{/each}
-						</ul>
-					{/if}
-				</div>
-			</div>
-
-			<!--
-				这一条专门回答「服务器信息是干嘛的、是不是给别人用的」：
-				llama-server 同时是一个 HTTP 服务，任何 OpenAI 兼容客户端都能直接连，
-				不需要经过本面板。地址与接口列在这里，点一下即可复制。
-			-->
-			<div class="mt-4 rounded-lg border border-border bg-card p-4 shadow-sm">
-				<div class="mb-2 flex flex-wrap items-center gap-2">
-					<Cable class="h-4 w-4 text-primary" />
-					<h3 class="text-sm font-semibold">API Access</h3>
-					<code class="rounded bg-muted px-2 py-0.5 font-mono text-xs">{apiBase}</code>
+				<div class="mt-3 flex flex-wrap items-center gap-2">
 					<button
-						class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs hover:bg-accent"
-						onclick={() => copyText(apiBase, 'base')}
-						title="Copy base URL"
+						class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-accent disabled:opacity-50"
+						disabled={cleanupLoading || cleanupBusy}
+						onclick={() => void loadCleanup()}
 						type="button"
 					>
-						{#if copiedKey === 'base'}
-							<Check class="h-3 w-3 text-emerald-500" />
-							<span>Copied</span>
-						{:else}
-							<Copy class="h-3 w-3" />
-							<span>Copy</span>
-						{/if}
+						<RefreshCw class="h-3 w-3" />
+						<span>Rescan</span>
 					</button>
-				</div>
-
-				<p class="text-xs text-muted-foreground">
-					<span
-						>This address is llama.cpp's own HTTP server (llama-server), not this panel. Any
-						OpenAI-compatible client can connect to it directly - Open WebUI, Cherry Studio, NextChat,
-						or your own script. No UI needed. Starting a model here restarts that server, so connected
-						clients will briefly disconnect.</span
-					>
-				</p>
-
-				<div class="mt-3 flex flex-wrap gap-1.5">
-					{#each endpoints as ep (ep.path)}
+					{#if cleanupReport.orphans.length > 0 && cleanupTrusted}
 						<button
-							class="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-0.5 font-mono text-[11px] hover:bg-accent"
-							onclick={() => copyText(apiBase + ep.path, ep.path)}
-							title={ep.desc}
+							class="inline-flex items-center gap-1 rounded-md border border-red-500/40 px-2 py-1 text-xs text-red-500 hover:bg-red-500/10 disabled:opacity-50"
+							disabled={cleanupBusy}
+							onclick={() => void runCleanup()}
 							type="button"
 						>
-							{#if copiedKey === ep.path}
-								<Check class="h-3 w-3 text-emerald-500" />
-							{:else}
-								<Copy class="h-2.5 w-2.5 text-muted-foreground" />
-							{/if}
-							<span>{ep.path}</span>
+							<Trash2 class="h-3 w-3" />
+							<span>Clean up unmanaged</span>
+							<span class="font-mono">{num(cleanupReport.reclaimable_mib, ' MiB')}</span>
 						</button>
-					{/each}
+					{:else if !cleanupTrusted}
+						<!-- 过渡期：旧 manager 分不清"本应用的残留"和"别的程序用我们 exe 起的实例"，
+						     宁可先不给清理入口，也别让用户一键把别的程序的模型杀掉 -->
+						<span class="text-[11px] text-amber-600 dark:text-amber-500">
+							<span>
+								Restart the app to enable cleanup: the running manager cannot tell other
+								programs apart.
+							</span>
+						</span>
+					{/if}
+					<span class="text-[11px] text-muted-foreground" style="max-width: 34rem">
+						<span>
+							The cleanup button stops only leftovers of this app: the same llama-server.exe,
+							not in the instance list and not listening on the active port. Processes started
+							by other apps are never touched.
+						</span>
+					</span>
 				</div>
 
-				<pre
-					class="mt-3 overflow-x-auto rounded-md bg-muted/60 p-2 font-mono text-[11px] text-muted-foreground"><code
-						>{curlExample}</code></pre>
+				{#if cleanupReport.parked_aliases.length > 0}
+					<p class="mt-2 text-[11px] text-muted-foreground">
+						<span>Parked duplicate files waiting for the process to release them:</span>
+						<span class="font-mono">{cleanupReport.parked_aliases.length}</span>
+					</p>
+				{/if}
+				{#if cleanupReport.stale_instances.length > 0}
+					<p class="mt-2 text-[11px] text-muted-foreground">
+						<span>Records the manager still marks as running, but whose process is gone:</span>
+						<span class="font-mono">{cleanupReport.stale_instances.length}</span>
+					</p>
+				{/if}
+
+				{#if cleanupDone}
+					<p class="mt-2 flex flex-wrap items-center gap-1 text-xs text-emerald-500">
+						{#if cleanupDone.stopped === 0}
+							<span>Nothing was stopped.</span>
+							{#if cleanupDone.reason}
+								<span class="font-mono text-muted-foreground">{cleanupDone.reason}</span>
+							{/if}
+						{:else}
+							<span>Stopped processes:</span>
+							<span class="font-mono">{cleanupDone.stopped}</span>
+							{#if cleanupDone.freed != null && cleanupDone.freed > 0}
+								<span>· VRAM released:</span>
+								<span class="font-mono">{cleanupDone.freed} MiB</span>
+							{:else}
+								<span>· Windows may take a moment to return the VRAM.</span>
+							{/if}
+						{/if}
+					</p>
+				{/if}
+			{:else if cleanupLoading}
+				<p class="mt-3 text-xs text-muted-foreground">
+					<span>Scanning for llama-server processes...</span>
+				</p>
+			{/if}
+		</div>
+	</CollapsibleSection>
+
+	<!-- ===== 服务器信息：服务端是谁、在跑什么、槽位在忙什么、别人怎么连进来 ===== -->
+	<!-- ===== 服务器信息：服务端是谁、在跑什么、槽位在忙什么、别人怎么连进来 ===== -->
+	<CollapsibleSection
+		id="server"
+		icon={Server}
+		storageKey={LS_SECTIONS}
+		title="Server Info"
+	>
+	<div class="grid gap-4 lg:grid-cols-3">
+			<!-- 当前模型 -->
+			<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
+				<div class="mb-2 flex items-center gap-2">
+					<Cpu class="h-4 w-4 text-muted-foreground" />
+					<h3 class="text-sm font-semibold">Current Model</h3>
+					<span class="ml-auto text-xs text-muted-foreground">/props</span>
+				</div>
+				{#if loadedModel}
+					<dl class="space-y-1 text-sm">
+						<div class="flex justify-between gap-3">
+							<dt class="text-muted-foreground">Name</dt>
+							<dd class="truncate font-mono">{loadedModel.name}</dd>
+						</div>
+						{#if loadedModel.size_gb > 0}
+							<div class="flex justify-between gap-3">
+								<dt class="text-muted-foreground">Size</dt>
+								<dd class="font-mono">{loadedModel.size_gb.toFixed(2)} GB</dd>
+							</div>
+						{/if}
+						{#if loadedModel.quant}
+							<div class="flex justify-between gap-3">
+								<dt class="text-muted-foreground">Quantization</dt>
+								<dd class="font-mono">{loadedModel.quant}</dd>
+							</div>
+						{/if}
+						{#if loadedModel.ctx_train}
+							<div class="flex justify-between gap-3">
+								<dt class="text-muted-foreground">Trained context</dt>
+								<dd class="font-mono">{loadedModel.ctx_train.toLocaleString()}</dd>
+							</div>
+						{/if}
+						{#if loadedModel.architecture}
+							<div class="flex justify-between gap-3">
+								<dt class="text-muted-foreground">Architecture</dt>
+								<dd class="font-mono">{loadedModel.architecture}</dd>
+							</div>
+						{/if}
+					</dl>
+					{#if loadedModel.path}
+						<p class="mt-2 truncate font-mono text-[11px] text-muted-foreground" title={loadedModel.path}>
+							{prettyPath(loadedModel.path)}
+						</p>
+					{/if}
+				{:else}
+					<p class="text-sm text-muted-foreground">No model loaded.</p>
+				{/if}
 			</div>
-		{/if}
-		</section>
+
+			<!-- 服务端 -->
+			<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
+				<div class="mb-2 flex items-center gap-2">
+					<Activity class="h-4 w-4 text-muted-foreground" />
+					<h3 class="text-sm font-semibold">Server</h3>
+					<span class="ml-auto text-xs text-muted-foreground">llama-server :8080</span>
+				</div>
+				{#if serverProps}
+					<dl class="space-y-1 text-sm">
+						<div class="flex justify-between gap-3">
+							<dt class="text-muted-foreground">Build</dt>
+							<dd class="break-all text-right font-mono text-xs">{buildLabel}</dd>
+						</div>
+						{#if serverProps.total_slots != null}
+							<div class="flex justify-between gap-3">
+								<dt class="text-muted-foreground">Slots</dt>
+								<dd class="font-mono">{serverProps.total_slots}</dd>
+							</div>
+						{/if}
+						{#if serverProps.default_generation_settings?.n_ctx}
+							<div class="flex justify-between gap-3">
+								<dt class="text-muted-foreground">n_ctx</dt>
+								<dd class="font-mono">{serverProps.default_generation_settings.n_ctx}</dd>
+							</div>
+						{/if}
+						<div class="flex justify-between gap-3">
+							<dt class="text-muted-foreground">Modalities</dt>
+							<dd class="font-mono">{modalityLabel}</dd>
+						</div>
+					</dl>
+				{:else if serverStore.error}
+					<p class="text-sm text-muted-foreground">
+						<span>Server not reachable.</span>
+					</p>
+				{:else}
+					<p class="text-sm text-muted-foreground">Loading…</p>
+				{/if}
+			</div>
+
+			<!-- 槽位活动：空闲时没有速度数据，有请求时才出现 -->
+			<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
+				<div class="mb-2 flex items-center gap-2">
+					<Layers class="h-4 w-4 text-muted-foreground" />
+					<h3 class="text-sm font-semibold">Slot activity</h3>
+					<span class="ml-auto text-xs text-muted-foreground">/slots</span>
+				</div>
+				<!--
+					「槽位」是什么，写清楚：llama-server 的并发单元 = -np 的值。
+					每个槽位一份独立 KV 缓存，就是一个可以同时进行的会话；
+					总上下文（-c）按槽位数均分，所以这里的 n_ctx 是「每槽」的量，
+					「槽位」×「每槽 n_ctx」才是整个服务能吃下的上下文。
+				-->
+				<p class="mb-2 text-xs leading-relaxed text-muted-foreground">
+					<!-- 单行是刻意的：overlay 按「整节点归一化文本」命中，换行会变成空格，拆行容易漏配 -->
+					<span>One slot = one request the server can handle at a time. This server uses a unified KV pool (-kvu), so every slot draws from the same context shown below instead of getting a slice of it.</span>
+				</p>
+				{#if !slotsOk}
+					<p class="text-sm text-muted-foreground">
+						<span>Slots not available.</span>
+					</p>
+				{:else if slots.length === 0}
+					<p class="text-sm text-muted-foreground">
+						<span>No slots.</span>
+					</p>
+				{:else}
+					<ul class="space-y-1">
+						{#each slots as s (s.id)}
+							<li class="flex items-center gap-2 text-xs">
+								<span class="font-mono text-muted-foreground">#{s.id}</span>
+								{#if s.is_processing}
+									<span
+										class="inline-flex items-center gap-1 rounded-sm bg-emerald-500/15 px-1.5 py-px font-medium text-emerald-600"
+									>
+										<span class="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500"></span>
+										Processing
+									</span>
+								{:else}
+									<span class="text-muted-foreground">Idle</span>
+								{/if}
+								<span class="text-muted-foreground">ctx</span>
+								<span class="font-mono text-muted-foreground">{s.n_ctx.toLocaleString()}</span>
+								{#if s.prompt_per_second != null}
+									<span class="ml-auto font-mono"
+										>pp {s.prompt_per_second.toFixed(0)} <span>tokens/s</span></span
+									>
+								{/if}
+								{#if s.predicted_per_second != null}
+									<span class="font-mono {s.prompt_per_second == null ? 'ml-auto' : ''}"
+										>tg {s.predicted_per_second.toFixed(1)} <span>tokens/s</span></span
+									>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</div>
+		</div>
+
+		<!--
+			这一条专门回答「服务器信息是干嘛的、是不是给别人用的」：
+			llama-server 同时是一个 HTTP 服务，任何 OpenAI 兼容客户端都能直接连，
+			不需要经过本面板。地址与接口列在这里，点一下即可复制。
+		-->
+		<div class="mt-4 rounded-lg border border-border bg-card p-4 shadow-sm">
+			<div class="mb-2 flex flex-wrap items-center gap-2">
+				<Cable class="h-4 w-4 text-primary" />
+				<h3 class="text-sm font-semibold">API Access</h3>
+				<code class="rounded bg-muted px-2 py-0.5 font-mono text-xs">{apiBase}</code>
+				<button
+					class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-0.5 text-xs hover:bg-accent"
+					onclick={() => copyText(apiBase, 'base')}
+					title="Copy base URL"
+					type="button"
+				>
+					{#if copiedKey === 'base'}
+						<Check class="h-3 w-3 text-emerald-500" />
+						<span>Copied</span>
+					{:else}
+						<Copy class="h-3 w-3" />
+						<span>Copy</span>
+					{/if}
+				</button>
+			</div>
+
+			<p class="text-xs text-muted-foreground">
+				<span
+					>This address is llama.cpp's own HTTP server (llama-server), not this panel. Any
+					OpenAI-compatible client can connect to it directly - Open WebUI, Cherry Studio, NextChat,
+					or your own script. No UI needed. Starting a model here restarts that server, so connected
+					clients will briefly disconnect.</span
+				>
+			</p>
+
+			<div class="mt-3 flex flex-wrap gap-1.5">
+				{#each endpoints as ep (ep.path)}
+					<button
+						class="inline-flex items-center gap-1 rounded-md border border-border bg-muted/40 px-2 py-0.5 font-mono text-[11px] hover:bg-accent"
+						onclick={() => copyText(apiBase + ep.path, ep.path)}
+						title={ep.desc}
+						type="button"
+					>
+						{#if copiedKey === ep.path}
+							<Check class="h-3 w-3 text-emerald-500" />
+						{:else}
+							<Copy class="h-2.5 w-2.5 text-muted-foreground" />
+						{/if}
+						<span>{ep.path}</span>
+					</button>
+				{/each}
+			</div>
+
+			<pre
+				class="mt-3 overflow-x-auto rounded-md bg-muted/60 p-2 font-mono text-[11px] text-muted-foreground"><code
+					>{curlExample}</code></pre>
+		</div>
+	</CollapsibleSection>
 
 	<!-- ===== 选模型：每一行都直接展示它当前生效的启动方案 ===== -->
-	<section class="mb-6 mt-6">
-		<div class="mb-3 flex items-center justify-between gap-3">
-			<h2 class="flex items-center gap-2 text-base font-semibold">
-				{@render secHead('switcher', 'Model Switcher', Power)}
-				<span class="text-xs font-normal text-muted-foreground">
-					· {filteredModels.length}/{availModels.length}&nbsp;<span>models</span>
-				</span>
-			</h2>
-			<div class="flex flex-wrap items-center gap-2 text-xs">
+	<!-- ===== 选模型：每一行都直接展示它当前生效的启动方案 ===== -->
+	<CollapsibleSection
+		class="mt-6"
+		id="switcher"
+		icon={Power}
+		storageKey={LS_SECTIONS}
+		title="Model Switcher"
+	>
+		{#snippet header()}
+			<span class="text-xs font-normal text-muted-foreground">
+				· {filteredModels.length}/{availModels.length}&nbsp;<span>models</span>
+			</span>
+			<div class="ml-auto flex flex-wrap items-center gap-2 text-xs">
 				{#each liveInstances as inst (inst.id)}
 					<span
 						class="inline-flex items-center gap-1 rounded-md border border-border bg-card px-2 py-0.5 font-mono"
@@ -1994,366 +2089,428 @@
 					</span>
 				{/each}
 			</div>
+		{/snippet}
+	{#if modelErr}
+		<div class="mb-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3 text-xs text-red-500">
+			<span>manager.py unreachable: {modelErr}</span>
+		</div>
+	{/if}
+
+	<!-- 被空闲看门狗卸掉的实例：明说"睡着了"，别让模型凭空消失 -->
+	{#if sleepingInstances.length > 0}
+		<div class="mb-3 rounded-lg border border-border bg-card p-3 text-xs text-muted-foreground">
+			<span>Sleeping after idle:</span>
+			<span class="font-mono">{sleepingInstances.map((i) => i.model).join(', ')}</span>
+			<span>· click Start to load it again</span>
+		</div>
+	{/if}
+
+	{#if switchPhase !== 'idle'}
+		<div class="mb-3 rounded-lg border border-border bg-card p-3 text-xs text-muted-foreground">
+			{#if switchPhase === 'stopping'}
+				Stopping…
+			{:else if switchPhase === 'starting'}
+				<span>Starting…</span> <span class="font-mono">{switchDetail}</span>
+			{:else if switchPhase === 'waiting'}
+				<span>Loading…</span> <span class="font-mono">{switchDetail}</span>
+				<span>· waiting for the server ·</span>
+				<span class="font-mono">{mmss(switchElapsed)}</span>
+				<!--
+					阶段进度。llama-server 没有进度 API，加载期间 /health 只有 503/200 两档；
+					这里是 manager 从它的 stdout 日志里解析出来的阶段
+					（见 manager.py 的 LOAD_STAGE_MARKERS）：
+					拉起进程 → 读取权重 → 线程池 → 超参数 → 视觉投影层 → KV 缓存 → 就绪。
+				-->
+				{#if managerLoadStore.active}
+					<div class="mt-2.5 h-1 w-full overflow-hidden rounded-full bg-border">
+						<div
+							class="h-full rounded-full bg-primary transition-[width] duration-500"
+							style:width="{Math.round((managerLoadStore.progress?.value ?? 0) * 100)}%"
+						></div>
+					</div>
+					<div class="mt-1.5 flex flex-wrap items-baseline gap-x-2">
+						<!-- ⚠️ 阶段名必须是独立文本节点：overlay.js 按整节点精确等值匹配，
+						     和百分比拼成一个串就永远翻译不出来。 -->
+						<span class="text-foreground">{managerLoadStore.label}</span>
+						<span class="font-mono opacity-70">{managerLoadStore.detail}</span>
+					</div>
+					<!-- 自适应降档要在**等待期间**就说明：以前它完全静默 ——
+					     用户设了 128K，实际下发 32K，界面上一个字都不提。 -->
+					{#if managerLoadStore.autoTunedCtx}
+						<div class="mt-1 text-amber-600 dark:text-amber-500">
+							<span>Context was lowered to fit your VRAM:</span>
+							<span class="font-mono"
+								>{managerLoadStore.progress?.requested_ctx} → {managerLoadStore.progress
+									?.n_ctx_slot}</span
+							>
+						</div>
+					{/if}
+				{/if}
+			{:else if switchPhase === 'started'}
+				<span>Started.</span> <span class="font-mono">{switchDetail}</span>
+			{:else if switchPhase === 'error' && (switchTimedOut || switchFatal)}
+				<!-- 区分"慢"和"错"：前者该调小 ctx 重试，后者该去看参数/显存。
+				     只报一个 "Timed out" 会把"参数拼错"这种立刻可修的问题说成"慢"。 -->
+				{#if switchFatal}
+					<span>Model failed to start ·</span>
+				{:else}
+					<span>Timed out waiting for the server ·</span>
+				{/if}
+				<span class="font-mono text-red-500">{switchDetail}</span>
+				{#if switchLog}
+					<pre
+						class="mt-2 max-h-32 overflow-auto rounded border border-red-500/30 bg-red-500/5 p-2 font-mono text-[11px] whitespace-pre-wrap text-red-500">{switchLog}</pre>
+				{/if}
+				{#if switchHint}
+					<p class="mt-2 text-amber-600 dark:text-amber-500">{switchHint}</p>
+				{/if}
+			{:else if switchPhase === 'error'}
+				<span>Error:</span> <span class="font-mono text-red-500">{switchDetail}</span>
+			{/if}
+		</div>
+	{/if}
+
+	<!-- 显存预演结论：manager 在启动前用 llama-fit-params 算过一遍，这里如实展示 -->
+	{#if fitInfo}
+		<div
+			class="mb-3 rounded-lg border border-border bg-card p-3 text-xs text-muted-foreground"
+			title={fitInfo.mode}
+		>
+			<span class="font-medium text-foreground">Preflight</span>
+			<span>· {fitInfo.note}</span>
+			{#if fitInfo.applied_ctx !== fitInfo.requested_ctx}
+				<span>· ctx</span>
+				<span class="font-mono">{fitInfo.requested_ctx.toLocaleString()}</span>
+				<span>→</span>
+				<span class="font-mono text-amber-600 dark:text-amber-500"
+					>{fitInfo.applied_ctx.toLocaleString()}</span
+				>
+			{/if}
+		</div>
+	{/if}
+
+	{#if availModels.length === 0}
+		<div
+			class="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground shadow-sm"
+		>
+			<span
+				>No GGUF models found in D:\llama\models and D:\llama\models\from-ollama. Drop a `.gguf`
+				file there, then refresh.</span
+			>
+		</div>
+	{:else}
+		<div class="relative mb-3 sm:max-w-sm">
+			<Search
+				class="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+			/>
+			<input
+				type="search"
+				class="w-full rounded-md border border-border bg-background py-1.5 pr-3 pl-9 text-sm"
+				placeholder="Search models…"
+				bind:value={modelQuery}
+			/>
 		</div>
 
-		{#if !collapsed.switcher}
-		{#if modelErr}
-			<div class="mb-3 rounded-lg border border-red-500/40 bg-red-500/5 p-3 text-xs text-red-500">
-				<span>manager.py unreachable: {modelErr}</span>
-			</div>
-		{/if}
-
-		<!-- 被空闲看门狗卸掉的实例：明说"睡着了"，别让模型凭空消失 -->
-		{#if sleepingInstances.length > 0}
-			<div class="mb-3 rounded-lg border border-border bg-card p-3 text-xs text-muted-foreground">
-				<span>Sleeping after idle:</span>
-				<span class="font-mono">{sleepingInstances.map((i) => i.model).join(', ')}</span>
-				<span>· click Start to load it again</span>
-			</div>
-		{/if}
-
-		{#if switchPhase !== 'idle'}
-			<div class="mb-3 rounded-lg border border-border bg-card p-3 text-xs text-muted-foreground">
-				{#if switchPhase === 'stopping'}
-					Stopping…
-				{:else if switchPhase === 'starting'}
-					<span>Starting…</span> <span class="font-mono">{switchDetail}</span>
-				{:else if switchPhase === 'waiting'}
-					<span>Loading…</span> <span class="font-mono">{switchDetail}</span>
-					<span>· waiting for the server ·</span>
-					<span class="font-mono">{mmss(switchElapsed)}</span>
-					<!--
-						阶段进度。llama-server 没有进度 API，加载期间 /health 只有 503/200 两档；
-						这里是 manager 从它的 stdout 日志里解析出来的阶段
-						（见 manager.py 的 LOAD_STAGE_MARKERS）：
-						拉起进程 → 读取权重 → 线程池 → 超参数 → 视觉投影层 → KV 缓存 → 就绪。
-					-->
-					{#if managerLoadStore.active}
-						<div class="mt-2.5 h-1 w-full overflow-hidden rounded-full bg-border">
+		<div class="max-h-64 overflow-y-auto rounded-lg border border-border bg-card/40 p-1">
+			{#if filteredModels.length === 0}
+				<p class="p-4 text-center text-sm text-muted-foreground">
+					No models match your search.
+				</p>
+			{:else}
+				<ul class="flex flex-col gap-1">
+					{#each filteredModels as m (m.path)}
+						{@const loaded = isLoaded(m)}
+						{@const focused = focusedPath === m.path}
+						{@const cfg = configFor(m)}
+						{@const custom = isCustomized(m)}
+						{@const ownPreset = launchPresetsStore.usesOwnPresetFor(m)}
+						<li>
 							<div
-								class="h-full rounded-full bg-primary transition-[width] duration-500"
-								style:width="{Math.round((managerLoadStore.progress?.value ?? 0) * 100)}%"
-							></div>
-						</div>
-						<div class="mt-1.5 flex flex-wrap items-baseline gap-x-2">
-							<!-- ⚠️ 阶段名必须是独立文本节点：overlay.js 按整节点精确等值匹配，
-							     和百分比拼成一个串就永远翻译不出来。 -->
-							<span class="text-foreground">{managerLoadStore.label}</span>
-							<span class="font-mono opacity-70">{managerLoadStore.detail}</span>
-						</div>
-						<!-- 自适应降档要在**等待期间**就说明：以前它完全静默 ——
-						     用户设了 128K，实际下发 32K，界面上一个字都不提。 -->
-						{#if managerLoadStore.autoTunedCtx}
-							<div class="mt-1 text-amber-600 dark:text-amber-500">
-								<span>Context was lowered to fit your VRAM:</span>
-								<span class="font-mono"
-									>{managerLoadStore.progress?.requested_ctx} → {managerLoadStore.progress
-										?.n_ctx_slot}</span
+								class="flex cursor-pointer items-center gap-3 rounded-md border px-3 py-2 transition-colors {loaded
+									? 'border-emerald-500/60 bg-emerald-500/5'
+									: focused
+										? 'border-primary/50 bg-accent/40'
+										: 'border-border bg-card hover:bg-accent/30'}"
+								onclick={() => (focusedPath = m.path)}
+								onkeydown={(e: KeyboardEvent) => {
+									if (e.key === 'Enter') focusedPath = m.path;
+								}}
+								role="button"
+								tabindex="0"
+							>
+								<div class="min-w-0 flex-1">
+									<div class="flex items-baseline gap-2">
+										<span class="truncate font-mono text-sm font-medium">{m.name}</span>
+										{#if loaded}
+											<span
+												class="inline-flex shrink-0 items-center gap-1 rounded-md bg-emerald-500 px-1.5 py-0.5 text-[10px] font-bold text-white"
+											>
+												loaded
+											</span>
+										{/if}
+										{#if custom}
+											<span
+												class="shrink-0 rounded-sm bg-primary/15 px-1 py-px text-[10px] font-medium text-primary"
+											>
+												custom
+											</span>
+										{/if}
+										{#if ownPreset}
+											<span
+												class="shrink-0 rounded-sm border border-primary/40 px-1 py-px text-[10px] text-primary"
+												title="Preset saved for this model"
+											>
+												{launchPresetsStore.presetNameFor(m)}
+											</span>
+										{/if}
+										{#if m.aliases && m.aliases.length > 0}
+											<span
+												class="shrink-0 rounded-sm bg-muted px-1 py-px text-[10px] text-muted-foreground"
+												title={m.aliases.join(', ')}
+											>
+												<span>same file</span>
+												<span class="ml-0.5">×{m.aliases.length}</span>
+											</span>
+										{/if}
+									</div>
+									<!-- 该模型此刻生效的启动方案：点 Start 就是按这一行跑 -->
+									<div
+										class="mt-0.5 flex flex-wrap items-center gap-x-2 font-mono text-xs text-muted-foreground"
+									>
+										<span>{cfg.ctx.toLocaleString()}</span>
+										<span>ctx</span>
+										<span>· KV</span>
+										<span>{cfg.ctk}</span>
+										<span>· ngl</span>
+										{#if cfg.ngl >= 99}
+											<!-- 99 及以上 = 不指定层数，交给 llama.cpp 启动时按空闲显存自己拟合 -->
+											<span>auto</span>
+										{:else}
+											<span>{cfg.ngl}</span>
+										{/if}
+										<span>· np</span>
+										<span>{cfg.np}</span>
+										<span>· {m.size_gb.toFixed(2)} GB</span>
+										{#if m.quant && m.quant !== '?'}
+											<span>· {m.quant}</span>
+										{/if}
+										<!--
+											「视觉」标：只有扫盘时配到了 mmproj 的模型才打。
+											manager 加载时会自动 --mmproj，所以打了标就真的能看图；
+											没打标的加载出来是纯文本（2026-09-21 用户据 /props 的
+											vision:false 问过「它不支持视觉吗」，标在这里让状态一眼可见）。
+											⚠️ 文本节点必须是纯静态词 "Vision"，overlay 才命中得了汉化。
+										-->
+										{#if m.mmproj}
+											<span
+												class="rounded bg-sky-500/15 px-1 py-px font-sans font-medium text-sky-600"
+												title={m.mmproj}
+											>
+												<span>Vision</span>
+											</span>
+										{/if}
+									</div>
+								</div>
+
+								<!-- 直接定位到这个模型的 gguf（Explorer 会打开目录并选中它） -->
+								<button
+									class="shrink-0 rounded-md border border-border p-1.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+									onclick={(e: MouseEvent) => {
+										e.stopPropagation();
+										openFolder(m.path);
+									}}
+									title="Open this folder in Explorer"
+									type="button"
 								>
+									<FolderOpen class="h-3.5 w-3.5" />
+								</button>
+
+								{#if loaded}
+									<!-- 空闲倒计时：manager 的看门狗会在 TTL 到期后把它卸掉，
+									     不显示的话用户会觉得模型"莫名其妙消失"（Ollama 的 UNTIL 列
+									     就是这个作用）。秒数由 idle_expires_at 每秒重算，真的在走。 -->
+									<span class="shrink-0 text-right text-xs text-muted-foreground">
+										{#if runningInstance?.pinned || (runningInstance?.ttl_seconds != null && runningInstance.ttl_seconds <= 0)}
+											<!-- 文案用 'Kept loaded' 而不是 'Pinned'：overlay.js 的词条是
+											     "整节点等值"匹配，而 'Pinned' 这个键已被上游侧边栏
+											     「置顶对话」占用（→ 已置顶），同一个对象里重复的键
+											     后者覆盖前者，会把侧边栏的译文静默改错。 -->
+											<span>Kept loaded</span>
+										{:else if idleLeftSecs != null}
+											<span>Idle</span>
+											<span class="font-mono">{mmss(runningInstance?.idle_seconds ?? 0)}</span>
+											<span>· unload in</span>
+											<span class="font-mono">{mmss(idleLeftSecs)}</span>
+										{:else if runningInstance?.idle_seconds != null}
+											<span>Idle</span>
+											<span class="font-mono">{mmss(runningInstance.idle_seconds)}</span>
+										{:else}
+											<span>In use</span>
+										{/if}
+									</span>
+
+									<!-- 常驻开关：8 GB 卡上「常用的那个模型被卸掉」比「多占 3 GB」更烦人，
+									     所以必须有 per-model 的"别卸我"（对标 Ollama 的 keep_alive: -1）。 -->
+									{#if runningInstance?.id}
+										<button
+											class="shrink-0 rounded-md border p-1.5 transition-colors {runningInstance.pinned
+												? 'border-primary/50 text-primary'
+												: 'border-border text-muted-foreground hover:border-primary/50 hover:text-primary'}"
+											disabled={pinBusy}
+											onclick={(e: MouseEvent) => {
+												e.stopPropagation();
+												togglePin(runningInstance);
+											}}
+											title={runningInstance.pinned
+												? 'Stop keeping this model loaded'
+												: 'Keep this model loaded (never unload when idle)'}
+											type="button"
+										>
+											<Pin class="h-3.5 w-3.5 {runningInstance.pinned ? 'fill-current' : ''}" />
+										</button>
+									{/if}
+								{:else}
+									<Button
+										class="shrink-0"
+										disabled={switchBusy}
+										onclick={(e: MouseEvent) => {
+											e.stopPropagation();
+											focusedPath = m.path;
+											startModel(m);
+										}}
+										size="sm"
+										variant="default"
+									>
+										Start
+									</Button>
+								{/if}
 							</div>
-						{/if}
-					{/if}
-				{:else if switchPhase === 'started'}
-					<span>Started.</span> <span class="font-mono">{switchDetail}</span>
-				{:else if switchPhase === 'error' && (switchTimedOut || switchFatal)}
-					<!-- 区分"慢"和"错"：前者该调小 ctx 重试，后者该去看参数/显存。
-					     只报一个 "Timed out" 会把"参数拼错"这种立刻可修的问题说成"慢"。 -->
-					{#if switchFatal}
-						<span>Model failed to start ·</span>
-					{:else}
-						<span>Timed out waiting for the server ·</span>
-					{/if}
-					<span class="font-mono text-red-500">{switchDetail}</span>
-					{#if switchLog}
-						<pre
-							class="mt-2 max-h-32 overflow-auto rounded border border-red-500/30 bg-red-500/5 p-2 font-mono text-[11px] whitespace-pre-wrap text-red-500">{switchLog}</pre>
-					{/if}
-					{#if switchHint}
-						<p class="mt-2 text-amber-600 dark:text-amber-500">{switchHint}</p>
-					{/if}
-				{:else if switchPhase === 'error'}
-					<span>Error:</span> <span class="font-mono text-red-500">{switchDetail}</span>
-				{/if}
-			</div>
-		{/if}
-
-		<!-- 显存预演结论：manager 在启动前用 llama-fit-params 算过一遍，这里如实展示 -->
-		{#if fitInfo}
-			<div
-				class="mb-3 rounded-lg border border-border bg-card p-3 text-xs text-muted-foreground"
-				title={fitInfo.mode}
+						</li>
+					{/each}
+				</ul>
+			{/if}
+		</div>
+		<p class="mt-2 text-xs text-muted-foreground">
+			<span>Click a row to edit that model's launch settings below.</span>
+		</p>
+		<p class="mt-1 text-xs text-muted-foreground/80">
+			<span
+				>Hard-linked duplicates (one file under two names) and mmproj projection layers are filtered
+				out of this list - they are not separately loadable models.</span
 			>
-				<span class="font-medium text-foreground">Preflight</span>
-				<span>· {fitInfo.note}</span>
-				{#if fitInfo.applied_ctx !== fitInfo.requested_ctx}
-					<span>· ctx</span>
-					<span class="font-mono">{fitInfo.requested_ctx.toLocaleString()}</span>
-					<span>→</span>
-					<span class="font-mono text-amber-600 dark:text-amber-500"
-						>{fitInfo.applied_ctx.toLocaleString()}</span
-					>
-				{/if}
+		</p>
+	{/if}
+	</CollapsibleSection>
+
+	<!-- ===== 配置区：左边改参数，右边实时看预测，同屏联动 ===== -->
+	<CollapsibleSection
+		id="setup"
+		icon={SlidersHorizontal}
+		storageKey={LS_SECTIONS}
+		title="Launch setup for"
+	>
+		{#snippet header()}
+			{#if targetModel}
+				<span
+					class="rounded-md bg-primary/10 px-2 py-0.5 font-mono text-sm font-semibold text-primary"
+				>
+					{targetModel.name}
+				</span>
+			{/if}
+			{#if targetModel && isLoaded(targetModel)}
+				<span class="rounded-md bg-emerald-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
+					loaded
+				</span>
+			{/if}
+			{#if targetCustom}
+				<span class="rounded-sm bg-primary/15 px-1.5 py-px text-[10px] font-medium text-primary">
+					custom
+				</span>
+			{/if}
+			{#if targetActivePreset}
+				<span
+					class="rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground"
+					title="Preset in effect for this model"
+				>
+					<span>{targetActivePreset.name}</span>
+				</span>
+			{/if}
+			<!-- 通用方案库的增删改；本模型自己的那份方案由左侧卡片管理，两边不重叠 -->
+			<DropdownMenu.Root>
+				<DropdownMenu.Trigger
+					class="group ml-auto inline-flex h-6 items-center gap-1.5 rounded-md border border-border bg-background pr-1.5 pl-2 text-xs text-foreground transition-colors hover:border-primary/40 data-[state=open]:border-primary/60"
+				>
+					<Settings2 class="size-3 shrink-0 opacity-60" />
+					<span>Manage presets</span>
+					<ChevronDown
+						class="size-3 shrink-0 opacity-60 transition-transform duration-200 group-data-[state=open]:-rotate-180"
+					/>
+				</DropdownMenu.Trigger>
+				<DropdownMenu.Content align="end" class="min-w-[13rem]">
+					<DropdownMenu.Item class="cursor-pointer text-xs" onclick={menuNewPreset}>
+						<span>New preset</span>
+					</DropdownMenu.Item>
+					{#if editingGlobalPreset}
+						<DropdownMenu.Item class="cursor-pointer text-xs" onclick={menuRenamePreset}>
+							<span>Rename preset</span>
+						</DropdownMenu.Item>
+						<DropdownMenu.Item
+							class="cursor-pointer text-xs"
+							disabled={launchPresetsStore.presets.length <= 1}
+							onclick={menuDeletePreset}
+						>
+							<span>Delete preset</span>
+						</DropdownMenu.Item>
+					{/if}
+					<DropdownMenu.Separator />
+					<DropdownMenu.Item class="cursor-pointer text-xs" onclick={menuRestoreBuiltins}>
+						<span>Restore built-ins</span>
+					</DropdownMenu.Item>
+				</DropdownMenu.Content>
+			</DropdownMenu.Root>
+		{/snippet}
+
+		{#if renamePresetId}
+			<div
+				class="mb-3 flex items-center gap-2 rounded-md border border-primary/40 bg-primary/5 p-2"
+			>
+				<input
+					bind:value={renamePresetName}
+					class="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-sm"
+					onkeydown={(e: KeyboardEvent) => {
+						if (e.key === 'Enter') doMenuRenamePreset();
+						if (e.key === 'Escape') renamePresetId = '';
+					}}
+					placeholder="Preset name"
+					type="text"
+				/>
+				<button
+					class="shrink-0 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:opacity-90"
+					onclick={doMenuRenamePreset}
+					type="button"
+				>
+					<span>Rename</span>
+				</button>
+				<button
+					class="shrink-0 rounded-md border border-border p-1 hover:bg-accent"
+					onclick={() => (renamePresetId = '')}
+					title="Cancel"
+					type="button"
+				>
+					<X class="h-3.5 w-3.5" />
+				</button>
 			</div>
 		{/if}
 
-		{#if availModels.length === 0}
+		{#if !targetModel || !targetCfg || !launchPresetsStore.active}
 			<div
 				class="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground shadow-sm"
 			>
-				<span
-					>No GGUF models found in D:\llama\models and D:\llama\models\from-ollama. Drop a `.gguf`
-					file there, then refresh.</span
-				>
-			</div>
-		{:else}
-			<div class="relative mb-3 sm:max-w-sm">
-				<Search
-					class="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground"
-				/>
-				<input
-					type="search"
-					class="w-full rounded-md border border-border bg-background py-1.5 pr-3 pl-9 text-sm"
-					placeholder="Search models…"
-					bind:value={modelQuery}
-				/>
-			</div>
-
-			<div class="max-h-64 overflow-y-auto rounded-lg border border-border bg-card/40 p-1">
-				{#if filteredModels.length === 0}
-					<p class="p-4 text-center text-sm text-muted-foreground">
-						No models match your search.
-					</p>
-				{:else}
-					<ul class="flex flex-col gap-1">
-						{#each filteredModels as m (m.path)}
-							{@const loaded = isLoaded(m)}
-							{@const focused = focusedPath === m.path}
-							{@const cfg = configFor(m)}
-							{@const custom = isCustomized(m)}
-							{@const ownPreset = launchPresetsStore.usesOwnPresetFor(m)}
-							<li>
-								<div
-									class="flex cursor-pointer items-center gap-3 rounded-md border px-3 py-2 transition-colors {loaded
-										? 'border-emerald-500/60 bg-emerald-500/5'
-										: focused
-											? 'border-primary/50 bg-accent/40'
-											: 'border-border bg-card hover:bg-accent/30'}"
-									onclick={() => (focusedPath = m.path)}
-									onkeydown={(e: KeyboardEvent) => {
-										if (e.key === 'Enter') focusedPath = m.path;
-									}}
-									role="button"
-									tabindex="0"
-								>
-									<div class="min-w-0 flex-1">
-										<div class="flex items-baseline gap-2">
-											<span class="truncate font-mono text-sm font-medium">{m.name}</span>
-											{#if loaded}
-												<span
-													class="inline-flex shrink-0 items-center gap-1 rounded-md bg-emerald-500 px-1.5 py-0.5 text-[10px] font-bold text-white"
-												>
-													loaded
-												</span>
-											{/if}
-											{#if custom}
-												<span
-													class="shrink-0 rounded-sm bg-primary/15 px-1 py-px text-[10px] font-medium text-primary"
-												>
-													custom
-												</span>
-											{/if}
-											{#if ownPreset}
-												<span
-													class="shrink-0 rounded-sm border border-primary/40 px-1 py-px text-[10px] text-primary"
-													title="Preset saved for this model"
-												>
-													{launchPresetsStore.presetNameFor(m)}
-												</span>
-											{/if}
-											{#if m.aliases && m.aliases.length > 0}
-												<span
-													class="shrink-0 rounded-sm bg-muted px-1 py-px text-[10px] text-muted-foreground"
-													title={m.aliases.join(', ')}
-												>
-													<span>same file</span>
-													<span class="ml-0.5">×{m.aliases.length}</span>
-												</span>
-											{/if}
-										</div>
-										<!-- 该模型此刻生效的启动方案：点 Start 就是按这一行跑 -->
-										<div
-											class="mt-0.5 flex flex-wrap items-center gap-x-2 font-mono text-xs text-muted-foreground"
-										>
-											<span>{cfg.ctx.toLocaleString()}</span>
-											<span>ctx</span>
-											<span>· KV</span>
-											<span>{cfg.ctk}</span>
-											<span>· ngl</span>
-											{#if cfg.ngl >= 99}
-												<!-- 99 及以上 = 不指定层数，交给 llama.cpp 启动时按空闲显存自己拟合 -->
-												<span>auto</span>
-											{:else}
-												<span>{cfg.ngl}</span>
-											{/if}
-											<span>· np</span>
-											<span>{cfg.np}</span>
-											<span>· {m.size_gb.toFixed(2)} GB</span>
-											{#if m.quant && m.quant !== '?'}
-												<span>· {m.quant}</span>
-											{/if}
-											<!--
-												「视觉」标：只有扫盘时配到了 mmproj 的模型才打。
-												manager 加载时会自动 --mmproj，所以打了标就真的能看图；
-												没打标的加载出来是纯文本（2026-09-21 用户据 /props 的
-												vision:false 问过「它不支持视觉吗」，标在这里让状态一眼可见）。
-												⚠️ 文本节点必须是纯静态词 "Vision"，overlay 才命中得了汉化。
-											-->
-											{#if m.mmproj}
-												<span
-													class="rounded bg-sky-500/15 px-1 py-px font-sans font-medium text-sky-600"
-													title={m.mmproj}
-												>
-													<span>Vision</span>
-												</span>
-											{/if}
-										</div>
-									</div>
-
-									<!-- 直接定位到这个模型的 gguf（Explorer 会打开目录并选中它） -->
-									<button
-										class="shrink-0 rounded-md border border-border p-1.5 text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
-										onclick={(e: MouseEvent) => {
-											e.stopPropagation();
-											openFolder(m.path);
-										}}
-										title="Open this folder in Explorer"
-										type="button"
-									>
-										<FolderOpen class="h-3.5 w-3.5" />
-									</button>
-
-									{#if loaded}
-										<!-- 空闲倒计时：manager 的看门狗会在 TTL 到期后把它卸掉，
-										     不显示的话用户会觉得模型"莫名其妙消失"（Ollama 的 UNTIL 列
-										     就是这个作用）。秒数由 idle_expires_at 每秒重算，真的在走。 -->
-										<span class="shrink-0 text-right text-xs text-muted-foreground">
-											{#if runningInstance?.pinned || (runningInstance?.ttl_seconds != null && runningInstance.ttl_seconds <= 0)}
-												<!-- 文案用 'Kept loaded' 而不是 'Pinned'：overlay.js 的词条是
-												     "整节点等值"匹配，而 'Pinned' 这个键已被上游侧边栏
-												     「置顶对话」占用（→ 已置顶），同一个对象里重复的键
-												     后者覆盖前者，会把侧边栏的译文静默改错。 -->
-												<span>Kept loaded</span>
-											{:else if idleLeftSecs != null}
-												<span>Idle</span>
-												<span class="font-mono">{mmss(runningInstance?.idle_seconds ?? 0)}</span>
-												<span>· unload in</span>
-												<span class="font-mono">{mmss(idleLeftSecs)}</span>
-											{:else if runningInstance?.idle_seconds != null}
-												<span>Idle</span>
-												<span class="font-mono">{mmss(runningInstance.idle_seconds)}</span>
-											{:else}
-												<span>In use</span>
-											{/if}
-										</span>
-
-										<!-- 常驻开关：8 GB 卡上「常用的那个模型被卸掉」比「多占 3 GB」更烦人，
-										     所以必须有 per-model 的"别卸我"（对标 Ollama 的 keep_alive: -1）。 -->
-										{#if runningInstance?.id}
-											<button
-												class="shrink-0 rounded-md border p-1.5 transition-colors {runningInstance.pinned
-													? 'border-primary/50 text-primary'
-													: 'border-border text-muted-foreground hover:border-primary/50 hover:text-primary'}"
-												disabled={pinBusy}
-												onclick={(e: MouseEvent) => {
-													e.stopPropagation();
-													togglePin(runningInstance);
-												}}
-												title={runningInstance.pinned
-													? 'Stop keeping this model loaded'
-													: 'Keep this model loaded (never unload when idle)'}
-												type="button"
-											>
-												<Pin class="h-3.5 w-3.5 {runningInstance.pinned ? 'fill-current' : ''}" />
-											</button>
-										{/if}
-									{:else}
-										<Button
-											class="shrink-0"
-											disabled={switchBusy}
-											onclick={(e: MouseEvent) => {
-												e.stopPropagation();
-												focusedPath = m.path;
-												startModel(m);
-											}}
-											size="sm"
-											variant="default"
-										>
-											Start
-										</Button>
-									{/if}
-								</div>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-			</div>
-			<p class="mt-2 text-xs text-muted-foreground">
-				<span>Click a row to edit that model's launch settings below.</span>
-			</p>
-			<p class="mt-1 text-xs text-muted-foreground/80">
-				<span
-					>Hard-linked duplicates (one file under two names) and mmproj projection layers are filtered
-					out of this list - they are not separately loadable models.</span
-				>
-			</p>
-		{/if}
-		{/if}
-	</section>
-
-	<!-- ===== 配置区：左边改参数，右边实时看预测，同屏联动 ===== -->
-	<section class="mb-6">
-		{#if !targetModel || !targetCfg || !launchPresetsStore.active}
-			<div class="rounded-lg border border-border bg-card p-5 text-sm text-muted-foreground shadow-sm">
 				No model selected.
 			</div>
 		{:else}
 			{@const m = targetModel}
-			{@const cfg = targetCfg}
-			<div class="mb-3 flex flex-wrap items-center gap-2">
-				<h2 class="flex items-center gap-2 text-base font-semibold">
-					{@render secHead('setup', 'Launch setup for', SlidersHorizontal)}
-				</h2>
-				<span class="rounded-md bg-primary/10 px-2 py-0.5 font-mono text-sm font-semibold text-primary">
-					{m.name}
-				</span>
-				{#if isLoaded(m)}
-					<span
-						class="rounded-md bg-emerald-500 px-1.5 py-0.5 text-[10px] font-bold text-white"
-					>
-						loaded
-					</span>
-				{/if}
-				{#if targetCustom}
-					<span
-						class="rounded-sm bg-primary/15 px-1.5 py-px text-[10px] font-medium text-primary"
-					>
-						custom
-					</span>
-				{/if}
-				{#if targetActivePreset}
-					<span
-						class="rounded-md border border-border px-2 py-0.5 text-xs text-muted-foreground"
-						title="Preset in effect for this model"
-					>
-						<span>{targetActivePreset.name}</span>
-					</span>
-				{/if}
-				<a class="ml-auto text-xs text-primary hover:underline" href={ROUTES.PARAMETERS}>
-					Edit presets &amp; parameters →
-				</a>
-			</div>
-
-			{#if !collapsed.setup}
+			{@const cfg = editCfg}
 			<!--
 				空闲卸载：参考 Ollama 的 KEEP_ALIVE / LM Studio 的 Idle TTL。
 				（"这个模型跑得动吗"的显存预演按钮已经移到右侧「加载后预测显存占用」卡片里，
@@ -2586,12 +2743,46 @@
 					{/if}
 
 					<div class="mt-3 border-t border-border/60 pt-3">
-						<div class="mb-1 flex items-center gap-2">
+						<div class="mb-2 flex flex-wrap items-center gap-2">
 							<SlidersHorizontal class="h-3.5 w-3.5 text-muted-foreground" />
-							<span class="text-xs font-medium">Model-specific settings</span>
+							<span class="text-xs font-medium">Launch parameters</span>
+							<!--
+								「编辑对象」开关：同一份表单写两个地方 —— 该模型的覆盖 / 这份方案本身。
+								以前改方案参数必须先跳到参数页，而两边字段完全一样，等于同一件事两个入口。
+							-->
+							<span class="ml-auto text-[11px] text-muted-foreground">Edit target</span>
+							<div class="inline-flex rounded-md border border-border p-0.5 text-[11px]">
+								<button
+									class="rounded px-2 py-0.5 transition-colors {editTarget === 'model'
+										? 'bg-primary text-primary-foreground'
+										: 'text-muted-foreground hover:bg-accent'}"
+									onclick={() => (editTarget = 'model')}
+									type="button"
+								>
+									<span>This model only</span>
+								</button>
+								<button
+									class="rounded px-2 py-0.5 transition-colors {editTarget === 'preset'
+										? 'bg-primary text-primary-foreground'
+										: 'text-muted-foreground hover:bg-accent'}"
+									onclick={() => (editTarget = 'preset')}
+									type="button"
+								>
+									<span>Preset default</span>
+								</button>
+							</div>
 						</div>
 						<p class="mb-3 text-xs text-muted-foreground">
-							These apply to this model only; other models keep following the preset.
+							{#if editTarget === 'preset'}
+								<span>Changes here apply to every model that uses this preset.</span>
+								{#if targetCustom}
+									<span class="ml-1 text-amber-600 dark:text-amber-500"
+										>· <span>this model has its own overrides, which win</span></span
+									>
+								{/if}
+							{:else}
+								<span>These apply to this model only; other models keep following the preset.</span>
+							{/if}
 						</p>
 
 						<div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -2599,10 +2790,10 @@
 								<span class="text-xs text-muted-foreground">Context size</span>
 								<input
 									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
-									max={m.ctx_train ?? undefined}
+									max={editTarget === 'model' ? (m.ctx_train ?? undefined) : undefined}
 									min="2048"
 									onchange={(e: Event) =>
-										setModelCtx(m, Number((e.currentTarget as HTMLInputElement).value))}
+										onCtx(Number((e.currentTarget as HTMLInputElement).value))}
 									step="1024"
 									type="number"
 									value={cfg.ctx}
@@ -2623,7 +2814,7 @@
 									</DropdownMenu.Trigger>
 									<DropdownMenu.Content align="start" class="min-w-[7rem]">
 										<DropdownMenu.RadioGroup
-											onValueChange={(v) => setModelCtk(m, v)}
+											onValueChange={(v) => onCtk(v)}
 											value={cfg.ctk}
 										>
 											{#each ['f16', 'q8_0', 'q4_0'] as q (q)}
@@ -2642,7 +2833,7 @@
 									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
 									min="0"
 									onchange={(e: Event) =>
-										setModelNgl(m, Number((e.currentTarget as HTMLInputElement).value))}
+										onNgl(Number((e.currentTarget as HTMLInputElement).value))}
 									step="1"
 									type="number"
 									value={cfg.ngl}
@@ -2659,7 +2850,7 @@
 									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
 									min="1"
 									onchange={(e: Event) =>
-										setModelNp(m, Number((e.currentTarget as HTMLInputElement).value))}
+										onNp(Number((e.currentTarget as HTMLInputElement).value))}
 									step="1"
 									type="number"
 									value={cfg.np}
@@ -2672,7 +2863,7 @@
 									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
 									min="1"
 									onchange={(e: Event) =>
-										setModelThreads(m, Number((e.currentTarget as HTMLInputElement).value))}
+										onThreads(Number((e.currentTarget as HTMLInputElement).value))}
 									step="1"
 									type="number"
 									value={cfg.threads}
@@ -2688,7 +2879,7 @@
 									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
 									min="32"
 									onchange={(e: Event) =>
-										setModelBatch(m, Number((e.currentTarget as HTMLInputElement).value))}
+										onBatch(Number((e.currentTarget as HTMLInputElement).value))}
 									step="32"
 									type="number"
 									value={cfg.batch}
@@ -2701,7 +2892,7 @@
 									class="rounded-md border border-border bg-background px-2 py-1 font-mono text-sm"
 									min="16"
 									onchange={(e: Event) =>
-										setModelUbatch(m, Number((e.currentTarget as HTMLInputElement).value))}
+										onUbatch(Number((e.currentTarget as HTMLInputElement).value))}
 									step="16"
 									type="number"
 									value={cfg.ubatch}
@@ -2716,7 +2907,7 @@
 									checked={cfg.flash_attn}
 									class="h-4 w-4"
 									onchange={(e: Event) =>
-										setModelFlashAttn(m, (e.currentTarget as HTMLInputElement).checked)}
+										onFlashAttn((e.currentTarget as HTMLInputElement).checked)}
 									type="checkbox"
 								/>
 								<span class="text-xs text-muted-foreground">Flash Attention</span>
@@ -2731,7 +2922,7 @@
 									c
 										? 'border-primary text-primary'
 										: 'border-border text-muted-foreground'}"
-									onclick={() => setModelCtx(m, c)}
+									onclick={() => onCtx(c)}
 									type="button"
 								>
 									{c / 1024}K
@@ -2945,50 +3136,74 @@
 				{/if}
 			</div>
 			{/if}
-		{/if}
-	</section>
+	</CollapsibleSection>
 
 	<!-- ===== 磁盘：每个目录都能点开资源管理器 ===== -->
-	<section>
-		<h2 class="mb-3 flex items-center gap-2 text-base font-semibold">
-			{@render secHead('disk', 'Models on disk', HardDrive)}
-		</h2>
-		{#if !collapsed.disk}
-		<div class="rounded-lg border border-border bg-card p-4 text-sm shadow-sm">
-			<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-muted-foreground">
-				<span class="font-mono text-foreground">{availModels.length}</span>
-				<span>models</span>
-				<span class="font-mono text-foreground">
-					{availModels.reduce((s, x) => s + x.size_gb, 0).toFixed(2)}
-					<span>GB</span>
-				</span>
-			</div>
-
-			<!-- 目录从 manager 返回的路径归纳，点一下就交给 manager 打开资源管理器 -->
-			<div class="mt-2 flex flex-wrap items-center gap-2">
-				{#each modelDirs as dir (dir)}
-					<button
-						class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 font-mono text-[11px] transition-colors hover:border-primary/50 hover:text-primary"
-						onclick={() => openFolder(dir)}
-						title="Open this folder in Explorer"
-						type="button"
-					>
-						<FolderOpen class="h-3 w-3 shrink-0 text-primary" />
-						<span>{dir}</span>
-					</button>
-				{/each}
-			</div>
-			<p class="mt-2 text-xs text-muted-foreground">
-				<span>Click a folder path to open it in Explorer.</span>
-			</p>
-			{#if openErr}
-				<p class="mt-1 text-xs text-amber-600">
-					<span>{openErr}</span>
-				</p>
-			{/if}
+	<CollapsibleSection
+		id="disk"
+		icon={HardDrive}
+		storageKey={LS_SECTIONS}
+		title="Models on disk"
+	>
+	<div class="rounded-lg border border-border bg-card p-4 text-sm shadow-sm">
+		<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-muted-foreground">
+			<span class="font-mono text-foreground">{availModels.length}</span>
+			<span>models</span>
+			<span class="font-mono text-foreground">
+				{availModels.reduce((s, x) => s + x.size_gb, 0).toFixed(2)}
+				<span>GB</span>
+			</span>
 		</div>
+
+		<!-- 目录从 manager 返回的路径归纳，点一下就交给 manager 打开资源管理器 -->
+		<div class="mt-2 flex flex-wrap items-center gap-2">
+			{#each modelDirs as dir (dir)}
+				<button
+					class="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 font-mono text-[11px] transition-colors hover:border-primary/50 hover:text-primary"
+					onclick={() => openFolder(dir)}
+					title="Open this folder in Explorer"
+					type="button"
+				>
+					<FolderOpen class="h-3 w-3 shrink-0 text-primary" />
+					<span>{dir}</span>
+				</button>
+			{/each}
+		</div>
+		<p class="mt-2 text-xs text-muted-foreground">
+			<span>Click a folder path to open it in Explorer.</span>
+		</p>
+		{#if openErr}
+			<p class="mt-1 text-xs text-amber-600">
+				<span>{openErr}</span>
+			</p>
 		{/if}
-	</section>
+	</div>
+	</CollapsibleSection>
+
+	<!--
+		本页自己的显示设置：GPU 卡片 / 预测显存块 / 刷新间隔。
+		以前挂在设置页的「性能」节，改一个开关要先跳到设置页 —— 而它管的不是应用偏好，
+		就是本页怎么显示。随设置页「性能」节一起搬到这里（字段定义仍在 SETTINGS_REGISTRY）。
+	-->
+	<CollapsibleSection
+		id="display"
+		icon={Settings2}
+		storageKey={LS_SECTIONS}
+		title="Display settings"
+	>
+		{#snippet header()}
+			<span class="text-xs text-muted-foreground">
+				<span>These settings only affect this page.</span>
+			</span>
+		{/snippet}
+		<div class="rounded-lg border border-border bg-card p-5 shadow-sm">
+			<SettingsChatFields
+				fields={displayFields}
+				{localConfig}
+				onConfigChange={handleConfigChange}
+			/>
+		</div>
+	</CollapsibleSection>
 </div>
 
 <!--

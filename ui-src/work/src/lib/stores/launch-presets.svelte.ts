@@ -811,13 +811,48 @@ class LaunchPresetsStore {
 		this.persist();
 	}
 
-	/** 更新当前方案参数（参数页编辑时逐字段调用） */
+	/** 更新当前方案参数（`activeId` 那份，参数页编辑时逐字段调用） */
 	patchActive(patch: Partial<LaunchConfig>) {
 		const id = this.activeId;
 		this.presets = this.presets.map((p) =>
 			p.id === id ? { ...p, builtin: false, config: { ...p.config, ...patch } } : p
 		);
 		this.persist();
+	}
+
+	/**
+	 * 按 id 更新**任意一份**方案（全局的，或某个模型自己保存的）。
+	 *
+	 * 为什么不能只靠 `patchActive`：性能页的「编辑对象 = 方案默认值」编辑的是
+	 * **该模型此刻生效的那份方案**——它可能是模型自己的方案（`modelPresets`），
+	 * 也可能是一份全局方案，未必等于 `activeId`。用 `select(id)` 再 `patchActive`
+	 * 是错的：那会把「全局当前方案」也一起改掉，等于顺手改了别的模型。
+	 *
+	 * 改的是已有 id，所以这里同时清掉 `builtin` 标记（内置方案一旦被改就不再是内置）。
+	 */
+	patchPreset(id: string, patch: Partial<LaunchConfig>): boolean {
+		if (!id) return false;
+
+		if (this.presets.some((p) => p.id === id)) {
+			this.presets = this.presets.map((p) =>
+				p.id === id ? { ...p, builtin: false, config: { ...p.config, ...patch } } : p
+			);
+			this.persist();
+			return true;
+		}
+
+		for (const [key, list] of Object.entries(this.modelPresets)) {
+			if (!list.some((p) => p.id === id)) continue;
+
+			this.modelPresets = {
+				...this.modelPresets,
+				[key]: list.map((p) => (p.id === id ? { ...p, config: { ...p.config, ...patch } } : p))
+			};
+			this.persistModelPresets();
+			return true;
+		}
+
+		return false;
 	}
 
 	create(name: string, config: LaunchConfig = this.active?.config ?? DEFAULT_LAUNCH_CONFIG) {

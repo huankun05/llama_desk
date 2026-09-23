@@ -53,6 +53,14 @@ export { default as ScrollCarousel } from './ScrollCarousel.svelte';
 export { default as CodeBlockActions } from './CodeBlockActions.svelte';
 
 /**
+ * **CollapsibleSection** - Collapsible titled section
+ *
+ * A titled block whose body can be collapsed by clicking the heading.
+ * Collapse state is remembered per page in localStorage.
+ */
+export { default as CollapsibleSection } from './CollapsibleSection.svelte';
+
+/**
  * **Logo** - Application brand mark
  *
  * Inline SVG of the application logo. Accepts styling via the standard

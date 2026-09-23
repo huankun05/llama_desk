@@ -765,9 +765,13 @@ function toSettingsSection(section: SettingsSectionEntry): SettingsSection {
  *
  * - sampling-penalties → `#/parameters`：调参主场在那里。两处都能改同一份
  *   SETTINGS_REGISTRY 数据属于「一件事两个入口」，容易让人不知道该改哪边。
+ * - performance → `#/performance` 末尾的「Display settings」。这三项（GPU 卡片 /
+ *   预测显存块 / 刷新间隔）管的不是应用偏好，而是**那页自己怎么显示**，
+ *   放在设置页意味着改一个开关先要跳过去。
  */
 export const SETTINGS_SLUGS_HIDDEN_FROM_PAGE: ReadonlySet<string> = new Set([
-	SETTINGS_SECTION_SLUGS.SAMPLING_PENALTIES
+	SETTINGS_SECTION_SLUGS.SAMPLING_PENALTIES,
+	SETTINGS_SECTION_SLUGS.PERFORMANCE
 ]);
 
 /** Sidebar sections in custom display order (the registry array order). */

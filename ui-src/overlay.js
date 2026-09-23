@@ -1048,6 +1048,25 @@
     'Saved for this model only. Next time you pick this model, the preset shows up right here.': '仅保存在这个模型下。下次选中该模型，这份方案就会出现在这里。',
     "Following this model's own preset. Other models are unaffected.": '正在使用该模型自己的方案，不影响其它模型。',
 
+    // ---- 启动参数合并到性能页：编辑对象开关 + 通用方案库（2026-09-23）----
+    // ⚠️ overlay 只按「整文本节点精确等值」匹配，所以下面这些标签在模板里都写成
+    // 独立的静态 <span>，不能和动态的方案名拼在同一个节点里。
+    'Edit target': '编辑对象',
+    'This model only': '仅本模型',
+    'Preset default': '方案默认值',
+    'Changes here apply to every model that uses this preset.': '这里的改动会作用于所有使用该方案的模型。',
+    'this model has its own overrides, which win': '本模型的独立覆盖值优先生效',
+    'Manage presets': '管理方案',
+    'New preset': '新建方案',
+    'Rename preset': '重命名方案',
+    'Delete preset': '删除方案',
+    'At least one preset must remain.': '至少要保留一个方案。',
+    'Display settings': '显示设置',
+    'These settings only affect this page.': '这些设置只影响本页显示。',
+    // 参数页只剩采样参数，启动设置改在性能页维护
+    'Sampling parameters only.': '仅采样参数。',
+    'Launch setup moved to Model & Performance →': '启动设置已移至「模型与性能」→',
+
     // ---- 服务器信息 = 可以给别的程序用的接口 ----
     'API Access': '接口接入',
     "This address is llama.cpp's own HTTP server (llama-server), not this panel. Any OpenAI-compatible client can connect to it directly - Open WebUI, Cherry Studio, NextChat, or your own script. No UI needed. Starting a model here restarts that server, so connected clients will briefly disconnect.": '这个地址是 llama.cpp 自带的 HTTP 服务（llama-server），不是本面板。任何支持 OpenAI 接口的客户端都能直接连上来 —— Open WebUI、Cherry Studio、NextChat，或你自己的脚本，无需经过本页面。在这里换模型会重启该服务，已连接的客户端会短暂断开。',
