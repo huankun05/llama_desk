@@ -227,7 +227,7 @@ if (mcpCount > 0) {
 	 */
 	const panelText = await page.evaluate(() => {
 		const box = [...document.querySelectorAll('div')].find((d) =>
-			/max-w-2xl/.test(String(d.className))
+			/max-w-3xl/.test(String(d.className))
 		);
 
 		return box ? (box.innerText || '').replace(/\s+/g, ' ').trim() : '';

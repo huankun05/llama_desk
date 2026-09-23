@@ -19,6 +19,7 @@
 		TriangleAlert
 	} from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button';
+	import * as Select from '$lib/components/ui/select';
 	import { APP_NAME } from '$lib/constants';
 	import { ManagerService } from '$lib/services';
 	import type { HfFileSummary, HfJob, HfRepoSummary } from '$lib/services';
@@ -32,6 +33,17 @@
 	let expanded = $state<string | null>(null);
 	let filesByRepo = $state<Record<string, HfFileSummary[]>>({});
 	let loadingFiles = $state<Record<string, boolean>>({});
+	/** 排序键（HF API 原生支持 downloads / likes / lastModified） */
+	const SORT_OPTIONS = [
+		{ value: 'downloads', label: 'Most downloads' },
+		{ value: 'likes', label: 'Most likes' },
+		{ value: 'lastModified', label: 'Recently updated' }
+	] as const;
+	type SortKey = (typeof SORT_OPTIONS)[number]['value'];
+	let sortBy = $state<SortKey>('downloads');
+	let sortLabel = $derived(
+		SORT_OPTIONS.find((o) => o.value === sortBy)?.label ?? 'Most downloads'
+	);
 	/** 整卡显存（来自 manager 的 /api/system-metrics），拿不到就只展示大小不打分 */
 	let vramTotalGb = $state<number | null>(null);
 	/** job_id -> 任务（轮询时整对象替换以触发响应式） */
@@ -88,7 +100,7 @@
 		searchError = null;
 
 		try {
-			const r = await ManagerService.hfSearch(query.trim(), 20);
+			const r = await ManagerService.hfSearch(query.trim(), 30, sortBy);
 
 			results = r.results;
 		} catch (e) {
@@ -97,6 +109,13 @@
 		} finally {
 			searching = false;
 		}
+	}
+
+	/** 已有结果时切排序 → 立刻按新排序重查；还没结果就只记住选择 */
+	function onSortChange(v: string): void {
+		sortBy = v as SortKey;
+
+		if (results.length > 0 || query.trim()) void doSearch();
 	}
 
 	async function toggleFiles(repo: string): Promise<void> {
@@ -154,7 +173,8 @@
 		startError = null;
 
 		try {
-			const r = await ManagerService.hfDownloadStart(repo, f.filename);
+			// size_bytes 带给 manager：分段预分配 + 进度条首帧就有正确的总数
+			const r = await ManagerService.hfDownloadStart(repo, f.filename, undefined, f.size_bytes);
 
 			jobs = { ...jobs, [r.job.id]: r.job };
 		} catch (e) {
@@ -203,7 +223,7 @@
 		</div>
 	</div>
 
-	<!-- 搜索 -->
+	<!-- 搜索 + 排序 -->
 	<div class="mb-2 flex gap-2">
 		<div class="relative flex-1">
 			<Search class="absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -217,6 +237,17 @@
 				}}
 			/>
 		</div>
+		<!-- 排序：HF API 原生排序键，切换时已有结果就立刻重查 -->
+		<Select.Root onValueChange={onSortChange} type="single" value={sortBy}>
+			<Select.Trigger class="w-fit shrink-0 text-xs" size="sm">
+				{sortLabel}
+			</Select.Trigger>
+			<Select.Content class="min-w-[11rem]">
+				{#each SORT_OPTIONS as o (o.value)}
+					<Select.Item class="text-xs" label={o.label} value={o.value} />
+				{/each}
+			</Select.Content>
+		</Select.Root>
 		<Button onclick={() => void doSearch()} disabled={searching}>
 			{searching ? 'Searching…' : 'Search'}
 		</Button>
@@ -252,6 +283,12 @@
 								{:else}
 									{fmtBytes(j.downloaded_bytes)} / {fmtBytes(j.total_bytes)}
 									{speed(j)}
+									{#if (j.connections ?? 0) > 1}
+										<!-- 多连接加速标记：×N 独占节点，"connections" 静态词给 overlay 翻译 -->
+										<span class="ml-1 inline-flex items-center gap-0.5 text-primary">
+											<span class="font-mono">×{j.connections}</span><span> connections</span>
+										</span>
+									{/if}
 								{/if}
 							</span>
 						</div>
@@ -305,6 +342,9 @@
 							<span class="shrink-0 text-xs text-muted-foreground">
 								<span>{r.downloads.toLocaleString()}</span><span> downloads</span> ·
 								<span>{r.likes.toLocaleString()}</span><span> likes</span>
+								{#if r.lastModified}
+									· <span>{r.lastModified.slice(0, 10)}</span>
+								{/if}
 							</span>
 						</div>
 						{#if expanded === r.id}

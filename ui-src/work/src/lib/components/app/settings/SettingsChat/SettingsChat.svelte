@@ -165,7 +165,7 @@
 			sections={SETTINGS_CHAT_SECTIONS}
 		/>
 
-		<div class="mx-auto max-w-2xl px-4 flex-1 md:mt-4">
+		<div class="mx-auto max-w-3xl px-4 flex-1 md:mt-4">
 			<div class="space-y-6 pt-3">
 				<!--
 					分区面板：标题 + 可折叠。左侧子导航负责"切到哪一节"，这里是"这一节的内容"，

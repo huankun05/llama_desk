@@ -2379,9 +2379,9 @@ IMMUTABLE_PREFIXES = ("/_app/immutable/", "/static/")
 # ---------- HTTP 处理 ----------
 # ============================================================
 # 第 2 批 A：应用内下载器（HuggingFace，纯标准库，零第三方依赖）
-#  - /api/hf-search   ?q=        搜 GGUF 模型仓库（HF API，按下载量排序）
+#  - /api/hf-search   ?q=&sort=  搜 GGUF 模型仓库（HF API；sort=downloads|likes|lastModified）
 #  - /api/hf-files    ?repo=     取某仓库的 .gguf 文件清单 + 大小（?blobs=true 一次请求）
-#  - /api/hf-download POST       断点续传下载（后台线程，支持进度 / 取消）
+#  - /api/hf-download POST       下载（后台线程，默认 4 连接分段并行 + 断点续传）
 #  - /api/hf-download/<id>       GET 进度
 #  - /api/hf-download/<id>/cancel POST 取消
 #  - /api/hf-downloads           列出全部任务（前端刷新后恢复）
@@ -2408,15 +2408,27 @@ def hf_http_json(url, timeout=20):
         return json.loads(r.read().decode("utf-8"))
 
 
-def hf_search(q, limit=20):
-    """搜 GGUF 仓库。q 为空时返回按下载量排序的热门 GGUF 仓库（浏览用）。"""
+def hf_search(q, limit=30, sort="downloads"):
+    """搜 GGUF 仓库。
+
+    模糊性：HF 的 search 只对 id 做**子串**匹配，不拆词 —— 直接搜 "qwen" 时，
+    按下载量取前 30 几乎全被 Qwen 官方非 GGUF 仓占据，再被 gguf 标签过滤后
+    只剩两三条（用户实测反馈「搜索结果太少」）。所以这里自动把 " gguf" 追加
+    到查询词后面 —— HF 搜索对多词是 AND 语义，结果基本只剩 GGUF 仓。
+    """
     try:
         limit = max(1, min(int(limit), 50))
     except (TypeError, ValueError):
-        limit = 20
+        limit = 30
+    if sort not in ("downloads", "likes", "lastModified"):
+        sort = "downloads"
     try:
-        qstr = urllib.parse.quote(q) if q else ""
-        url = "%s/models?search=%s&limit=%d&sort=downloads&direction=-1" % (HF_API, qstr, limit)
+        q = (q or "").strip()
+        if q and "gguf" not in q.lower():
+            q = q + " gguf"
+        qstr = urllib.parse.quote(q)
+        url = "%s/models?search=%s&limit=%d&sort=%s&direction=-1" % (
+            HF_API, qstr, limit, sort)
         data = hf_http_json(url)
     except Exception:
         return []
@@ -2462,8 +2474,114 @@ def _hf_safe_name(repo):
     return re.sub(r"[^A-Za-z0-9._\-]+", "_", repo or "repo")
 
 
-def hf_download_start(repo, filename, dest_name=None):
-    """建任务 + 起后台线程断点续传。返回任务 dict。"""
+# ---- 多连接加速（分段并行 Range 下载） --------------------------------
+# 单连接跑 HF CDN 一般也有几 MB/s，但家宽/代理对单连接限速时，4 连接分段
+# 能近似 ×4。实现要点（每一条都是踩过/防住的坑）：
+# ① 文件必须**预分配**到全长再让各线程按 offset 写（r+b + seek），绝不能
+#    各线程独立 'ab' 追加 —— 顺序会乱。
+# ② 断点以 sidecar（<dest>.segs.json）记录每段 done；只有 sidecar + 文件
+#    大小对得上才认账。**老版单流 partial 是顺序写的**，可以按顺序把前缀
+#    认领给前几段 —— 但扩展文件必须 r+b seek 到末尾写 0（不能 'wb' 截断，
+#    否则认领的 done 全是零字节数据）。
+# ③ 服务器不认 Range（回 200 而非 206）→ 回落单流。
+# ④ < 64MB 不值得分段（连接建立开销占比过高）。
+HF_MAX_CONN = 4
+HF_MIN_SEG_TOTAL = 64 * 1024 * 1024
+
+
+def _hf_resolve(url):
+    """拿 resolve 的最终 CDN 地址（手动跟一次 302，便于对 CDN 直接发 Range）。"""
+    opener = urllib.request.build_opener(_HFNoRedirect())
+    try:
+        resp = opener.open(urllib.request.Request(url, headers=HF_HEADERS), timeout=30)
+        status, loc = resp.status, resp.headers.get("Location")
+        resp.close()
+    except urllib.error.HTTPError as e:
+        status, loc = e.code, e.headers.get("Location")
+    if status in (301, 302, 303, 307, 308) and loc:
+        return loc
+    return url
+
+
+def _hf_probe_total(url):
+    """Content-Length 未知时，用 Range: bytes=0-0 探测全文件大小。"""
+    try:
+        req = urllib.request.Request(url, headers=dict(HF_HEADERS, Range="bytes=0-0"))
+        with urllib.request.urlopen(req, timeout=30) as r:
+            cr = r.headers.get("Content-Range") or ""
+            if "/" in cr:
+                return int(cr.split("/")[-1])
+            cl = r.headers.get("Content-Length")
+            return int(cl) if cl else 0
+    except (urllib.error.URLError, ValueError, OSError):
+        return 0
+
+
+def _hf_plan_segments(total, existing=0):
+    """把 [0,total) 切成 HF_MAX_CONN 段。
+
+    ⚠️ existing 参数已废弃（保留兼容旧调用）：把「文件已有字节数」认领成
+    done 的启发式**只对老版单流顺序写安全** —— 对预分配（稀疏零字节）文件
+    会把零认领成已下载，凑上大小就假 completed（实测踩坑：假 total 造成
+    sidecar 失配 → 走认领 → 文件 92% 是零却显示完成）。无 sidecar 一律重下。
+    """
+    n = HF_MAX_CONN if total >= HF_MIN_SEG_TOTAL else 1
+    seg_len = total // n
+    segs = []
+    for i in range(n):
+        s = i * seg_len
+        e = total - 1 if i == n - 1 else s + seg_len - 1
+        segs.append([s, e, 0])
+    return segs
+
+
+def _hf_sidecar_path(dest):
+    return dest + ".segs.json"
+
+
+def _hf_load_sidecar(dest, total_hint):
+    """读 sidecar；total 对不上或文件缺失/比 total 短 → 不认账（返回 None）。"""
+    try:
+        with open(_hf_sidecar_path(dest), "r", encoding="utf-8") as f:
+            side = json.load(f)
+        segs = side.get("segments")
+        total = int(side.get("total") or 0)
+        if not segs or total <= 0:
+            return None
+        if total_hint and total != int(total_hint):
+            return None
+        if not os.path.isfile(dest) or os.path.getsize(dest) < total:
+            return None
+        ok = all(isinstance(s, list) and len(s) == 3 for s in segs)
+        return segs if ok else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _hf_save_sidecar(job, force=False):
+    """sidecar 落盘（限频 2s，除非 force）—— 断电/杀进程也能续。"""
+    now = time.time()
+    if not force and now - job.get("_last_sidecar_at", 0) < 2.0:
+        return
+    job["_last_sidecar_at"] = now
+    try:
+        with HF_JOBS_LOCK:
+            payload = {"total": job["total_bytes"],
+                       "segments": [list(s) for s in job["segments"]]}
+        with open(_hf_sidecar_path(job["dest"]), "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def _hf_sync_progress(job):
+    with HF_JOBS_LOCK:
+        job["downloaded_bytes"] = sum(s[2] for s in job["segments"])
+        job["connections"] = sum(1 for s in job["segments"] if s[2] < s[1] - s[0] + 1)
+
+
+def hf_download_start(repo, filename, dest_name=None, total_bytes=0, accel=True):
+    """建任务 + 起后台线程下载（默认多连接分段，断点续传）。返回任务 dict。"""
     dest_dir = os.path.join(WEBUI_DIR, "..", "models", "from-hf", _hf_safe_name(repo))
     try:
         os.makedirs(dest_dir, exist_ok=True)
@@ -2473,14 +2591,174 @@ def hf_download_start(repo, filename, dest_name=None):
     job_id = uuid.uuid4().hex
     job = {
         "id": job_id, "repo": repo, "filename": filename, "dest": dest,
-        "total_bytes": 0, "downloaded_bytes": 0, "status": "starting",
-        "speed_bps": 0, "error": None, "started_at": time.time(),
-        "finished_at": None, "cancel": False,
+        "total_bytes": int(total_bytes or 0), "downloaded_bytes": 0,
+        "status": "starting", "speed_bps": 0, "error": None,
+        "started_at": time.time(), "finished_at": None, "cancel": False,
+        "accel": bool(accel), "segments": [], "connections": 0,
+        "_last_sidecar_at": 0.0,
     }
     with HF_JOBS_LOCK:
         HF_JOBS[job_id] = job
     threading.Thread(target=_hf_download_worker, args=(job_id,), daemon=True).start()
     return job
+
+
+def _hf_single_stream(job, url, start):
+    """单流下载（小文件 / 服务器不认 Range / accel 关闭时的路径）。"""
+    dest = job["dest"]
+    hdr = dict(HF_HEADERS)
+    if start > 0:
+        hdr["Range"] = "bytes=%d-" % start
+    req = urllib.request.Request(url, headers=hdr)
+    with urllib.request.urlopen(req, timeout=90) as r:
+        cl = r.headers.get("Content-Length")
+        cr = r.headers.get("Content-Range")
+        total = job.get("total_bytes") or 0
+        if cr and "/" in cr:
+            try:
+                total = int(cr.split("/")[-1])
+            except (TypeError, ValueError):
+                total = 0
+        elif cl:
+            try:
+                total = start + int(cl)
+            except (TypeError, ValueError):
+                total = 0
+        job["total_bytes"] = total
+        if r.status not in (200, 206):
+            raise OSError("unexpected status %d" % r.status)
+        _t0, _b0 = time.time(), job["downloaded_bytes"]
+        mode = "ab" if start > 0 else "wb"
+        with open(dest, mode) as f:
+            while True:
+                with HF_JOBS_LOCK:
+                    if job["cancel"]:
+                        job["status"] = "canceled"
+                        break
+                chunk = r.read(64 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                job["downloaded_bytes"] += len(chunk)
+                now = time.time()
+                if now - _t0 >= 1.0:
+                    job["speed_bps"] = (job["downloaded_bytes"] - _b0) / (now - _t0)
+                    _t0, _b0 = now, job["downloaded_bytes"]
+
+
+def _hf_segment_thread(job, seg, url):
+    """一个分段连接：Range=(s0+done)-(end)，按 offset 写预分配好的文件。"""
+    s0, end = seg[0], seg[1]
+    dest = job["dest"]
+    while seg[2] <= end - s0:
+        with HF_JOBS_LOCK:
+            if job["cancel"] or job["status"] == "error":
+                return
+        pos = s0 + seg[2]
+        hdr = dict(HF_HEADERS, Range="bytes=%d-%d" % (pos, end))
+        try:
+            req = urllib.request.Request(url, headers=hdr)
+            with urllib.request.urlopen(req, timeout=90) as r:
+                if r.status != 206:
+                    job["error"] = "server ignored Range (status %d)" % r.status
+                    with HF_JOBS_LOCK:
+                        job["status"] = "error"
+                        job["cancel"] = True
+                    return
+                with open(dest, "r+b") as f:
+                    f.seek(pos)
+                    while seg[2] <= end - s0:
+                        with HF_JOBS_LOCK:
+                            if job["cancel"] or job["status"] == "error":
+                                return
+                        # ⚠️ 网络 read 绝不能持锁 —— 否则 4 个线程在读上串行化，
+                        #    「多连接加速」就名存实亡了。锁只护状态与计数。
+                        chunk = r.read(64 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        with HF_JOBS_LOCK:
+                            seg[2] += len(chunk)
+                            job["downloaded_bytes"] = sum(s[2] for s in job["segments"])
+                        now = time.time()
+                        if now - job["_speed_t0"] >= 1.0:
+                            job["speed_bps"] = (
+                                job["downloaded_bytes"] - job["_speed_b0"]) / (now - job["_speed_t0"])
+                            job["_speed_t0"], job["_speed_b0"] = now, job["downloaded_bytes"]
+        except Exception as e:
+            # 单段网络抖动：不放弃整个任务，把 error 记下、由外层重试一次
+            job["_seg_errors"] = job.get("_seg_errors", 0) + 1
+            job["_last_error"] = "%s: %s" % (type(e).__name__, e)
+            if job.get("_seg_errors", 0) > 3:
+                with HF_JOBS_LOCK:
+                    job["status"] = "error"
+                    job["error"] = job["_last_error"]
+                    job["cancel"] = True
+                return
+            time.sleep(1.0)
+
+
+def _hf_segmented(job, url, segs):
+    """多连接分段下载主流程：预分配 → 起线程 → join → 校验。"""
+    dest = job["dest"]
+    total = int(job["total_bytes"])
+    existing = os.path.getsize(dest) if os.path.isfile(dest) else 0
+    if existing < total:
+        # 扩展到全长（r+b 不截断已有数据 —— 认领的 done 才有效）
+        with open(dest, "r+b" if existing else "wb") as f:
+            f.seek(total - 1)
+            f.write(b"\x00")
+    elif existing > total:
+        # 文件比声称的大（脏数据）→ 全部重下
+        segs = _hf_plan_segments(total, 0)
+        with open(dest, "wb") as f:
+            f.seek(total - 1)
+            f.write(b"\x00")
+    job["segments"] = segs
+    job["total_bytes"] = total
+    _hf_sync_progress(job)
+    # ⚠️ 起线程**之前**先落一份 sidecar：否则任务刚起就被杀（或取消收尾前
+    #    又起了个新任务）时磁盘上没有 sidecar，下次会把预分配的全零文件
+    #    「按大小认领」成一个秒完成的坏文件。
+    _hf_save_sidecar(job, force=True)
+    job["_speed_t0"], job["_speed_b0"] = time.time(), job["downloaded_bytes"]
+    # ⚠️ cancel 可能在本任务还在 resolving/预分配（status=starting）时就到：
+    #    不能无条件覆写成 downloading —— 那会把「已取消」洗成「已完成」
+    #    （预分配文件大小恰好等于 total，收尾校验必过）。
+    with HF_JOBS_LOCK:
+        if job["cancel"]:
+            # 线程还没起、没有 join 收尾 —— 这里必须直接落终态，
+            # 否则永远停在 canceling（实测踩坑：探针点得快就卡死在这）。
+            job["status"] = "canceled"
+            return
+        job["status"] = "downloading"
+    threads = [threading.Thread(target=_hf_segment_thread, args=(job, seg, url), daemon=True)
+               for seg in segs if seg[2] < seg[1] - seg[0] + 1]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    _hf_save_sidecar(job, force=True)
+    # 路由的 cancel 端点只把状态置到 canceling —— 线程全停之后收尾成 canceled
+    if job["status"] == "canceling":
+        job["status"] = "canceled"
+    if job["status"] == "downloading":
+        final = os.path.getsize(dest) if os.path.isfile(dest) else 0
+        if final != total:
+            job["status"] = "error"
+            job["error"] = job.get("error") or (
+                "size mismatch: got %d, want %d" % (final, total))
+        else:
+            job["status"] = "completed"
+            job["finished_at"] = time.time()
+            try:
+                os.remove(_hf_sidecar_path(dest))
+            except OSError:
+                pass
+            try:
+                _do_scan()
+            except Exception:
+                pass
 
 
 def _hf_download_worker(job_id):
@@ -2490,82 +2768,54 @@ def _hf_download_worker(job_id):
         return
     dest = job["dest"]
     resolve = "https://huggingface.co/%s/resolve/main/%s" % (job["repo"], job["filename"])
-    # 续传起点：已有文件大小（HF LFS 文件落盘不完整时接着下）
-    start = 0
-    if os.path.isfile(dest):
-        try:
-            start = os.path.getsize(dest)
-        except OSError:
-            start = 0
-    job["downloaded_bytes"] = start
-    job["status"] = "downloading"
+    job["status"] = "starting"
     try:
-        # ① 拿 resolve 的重定向位置（手动重发 Range 的准备工作）
-        opener = urllib.request.build_opener(_HFNoRedirect())
-        try:
-            resp = opener.open(urllib.request.Request(resolve, headers=HF_HEADERS), timeout=30)
-            status = resp.status
-            location = resp.headers.get("Location")
-        except urllib.error.HTTPError as e:
-            status = e.code
-            location = e.headers.get("Location")
-        url = location if (status in (301, 302, 303, 307, 308) and location) else resolve
+        url = _hf_resolve(resolve)
+        existing = os.path.getsize(dest) if os.path.isfile(dest) else 0
 
-        # ② 带 Range 取数据；已知 total 来自 blobs（权威），兜底用 Content-Range/Content-Length
-        hdr = dict(HF_HEADERS)
-        if start > 0:
-            hdr["Range"] = "bytes=%d-" % start
-        req2 = urllib.request.Request(url, headers=hdr)
-        with urllib.request.urlopen(req2, timeout=90) as r2:
-            cl = r2.headers.get("Content-Length")
-            cr = r2.headers.get("Content-Range")
-            total = job.get("total_bytes") or 0
-            if cr and "/" in cr:
-                try:
-                    total = int(cr.split("/")[-1])
-                except (TypeError, ValueError):
-                    total = 0
-            elif cl:
-                try:
-                    total = start + int(cl)
-                except (TypeError, ValueError):
-                    total = 0
+        # ---- 路由：多连接分段 vs 单流 ----
+        # ⚠️ _hf_load_sidecar 返回的就是分段列表（或 None），不是 dict。
+        #    sidecar 无效（total 不匹配/文件缺失）→ 一律从头下，**绝不**按
+        #    文件大小认领（预分配零字节会被认成已下载 → 假完成，实测踩坑）。
+        side = _hf_load_sidecar(dest, job["total_bytes"])
+        segs = None
+        total = int(job.get("total_bytes") or 0)
+        use_accel = bool(job.get("accel"))
+        if side:
+            segs = side
+            use_accel = use_accel and existing >= total
+        elif use_accel:
+            if not total:
+                total = _hf_probe_total(url)
+            use_accel = bool(total) and total >= HF_MIN_SEG_TOTAL
+            if use_accel:
+                segs = _hf_plan_segments(total, 0)
+        if use_accel and segs:
             job["total_bytes"] = total
-            _t0, _b0 = time.time(), job["downloaded_bytes"]
-            mode = "ab" if start > 0 else "wb"
-            with open(dest, mode) as f:
-                while True:
-                    with HF_JOBS_LOCK:
-                        if job["cancel"]:
-                            job["status"] = "canceled"
-                            break
-                    chunk = r2.read(256 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    job["downloaded_bytes"] += len(chunk)
-                    now = time.time()
-                    if now - _t0 >= 1.0:
-                        job["speed_bps"] = (job["downloaded_bytes"] - _b0) / (now - _t0)
-                        _t0, _b0 = now, job["downloaded_bytes"]
-        # ③ 完成校验：大小对不上 = 失败（HF 偶尔返回错误体积）
-        if job["status"] == "downloading":
-            final = os.path.getsize(dest) if os.path.isfile(dest) else 0
-            if job["total_bytes"] and final != job["total_bytes"]:
-                job["status"] = "error"
-                job["error"] = "size mismatch: got %d, want %d" % (final, job["total_bytes"])
-            else:
-                job["status"] = "completed"
-                job["finished_at"] = time.time()
-                # 让新模型立刻出现在 /api/models（触发一次扫盘）
-                try:
-                    _do_scan()
-                except Exception:
-                    pass
+            _hf_segmented(job, url, segs)
+        else:
+            _hf_single_stream(job, url, existing)
+            # 单流取消/完成后也把状态收尾
+            if job["status"] == "downloading":
+                final = os.path.getsize(dest) if os.path.isfile(dest) else 0
+                if job["total_bytes"] and final != job["total_bytes"]:
+                    job["status"] = "error"
+                    job["error"] = "size mismatch: got %d, want %d" % (
+                        final, job["total_bytes"])
+                else:
+                    job["status"] = "completed"
+                    job["finished_at"] = time.time()
+                    try:
+                        _do_scan()
+                    except Exception:
+                        pass
     except Exception as e:
         job["status"] = "error"
         job["error"] = "%s: %s" % (type(e).__name__, e)
     finally:
+        with HF_JOBS_LOCK:
+            job["segments"] = []
+            job["connections"] = 0
         job["finished_at"] = job.get("finished_at") or time.time()
         job["speed_bps"] = 0
 
@@ -2856,12 +3106,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(200, {"ok": ok})
             # ---------- 第 2 批 A：HuggingFace 下载器 ----------
             elif p == "/api/hf-search":
-                q = parse_qs(u.query).get("q", [""])[0]
+                qs = parse_qs(u.query)
+                q = qs.get("q", [""])[0]
                 try:
-                    limit = int(parse_qs(u.query).get("limit", ["20"])[0])
+                    limit = int(qs.get("limit", ["30"])[0])
                 except (TypeError, ValueError):
-                    limit = 20
-                self.json(200, {"ok": True, "query": q, "results": hf_search(q, limit)})
+                    limit = 30
+                sort = qs.get("sort", ["downloads"])[0]
+                self.json(200, {"ok": True, "query": q,
+                                "results": hf_search(q, limit, sort)})
             elif p == "/api/hf-files":
                 repo = parse_qs(u.query).get("repo", [""])[0]
                 if not repo:
@@ -2876,10 +3129,16 @@ class Handler(BaseHTTPRequestHandler):
                 repo = (data or {}).get("repo")
                 filename = (data or {}).get("filename")
                 dest_name = (data or {}).get("dest_name")
+                try:
+                    total_bytes = int((data or {}).get("total_bytes") or 0)
+                except (TypeError, ValueError):
+                    total_bytes = 0
+                accel = bool((data or {}).get("accel", True))
                 if not repo or not filename:
                     self.json(400, {"ok": False, "error": "repo and filename required"})
                 else:
-                    job = hf_download_start(repo, filename, dest_name)
+                    job = hf_download_start(repo, filename, dest_name,
+                                            total_bytes=total_bytes, accel=accel)
                     self.json(200, {"ok": True, "job": dict(job)})
             elif p.startswith("/api/hf-download/") and p.endswith("/cancel"):
                 jid = p[len("/api/hf-download/"):-len("/cancel")].strip("/")

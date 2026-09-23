@@ -378,6 +378,8 @@ export interface HfJob {
 	started_at: number;
 	finished_at: number | null;
 	cancel: boolean;
+	/** 多连接分段下载：并行连接数（0 = 未分段/已收尾）。 */
+	connections?: number;
 }
 
 export interface HfJobResponse {
@@ -468,9 +470,16 @@ export class ManagerService {
 	}
 
 	// ---------- 第 2 批 A：HuggingFace 下载器 ----------
-	/** 搜 GGUF 仓库。q 为空时返回热门 GGUF（浏览用）。 */
-	static hfSearch(q: string, limit = 20): Promise<HfSearchResponse> {
-		const qs = new URLSearchParams({ q, limit: String(limit) }).toString();
+	/**
+	 * 搜 GGUF 仓库。q 为空时返回热门 GGUF（浏览用）。
+	 * sort: downloads | likes | lastModified（后端会自动给 q 追加 " gguf"）。
+	 */
+	static hfSearch(
+		q: string,
+		limit = 30,
+		sort: 'downloads' | 'likes' | 'lastModified' = 'downloads'
+	): Promise<HfSearchResponse> {
+		const qs = new URLSearchParams({ q, limit: String(limit), sort }).toString();
 
 		return managerFetch<HfSearchResponse>(`/api/hf-search?${qs}`);
 	}
@@ -485,16 +494,20 @@ export class ManagerService {
 		return managerFetch<HfDownloadsResponse>('/api/hf-downloads');
 	}
 
-	/** 开始断点续传下载，返回任务。 */
+	/**
+	 * 开始下载（4 连接分段并行 + 断点续传）。
+	 * totalBytes 从 hf-files 的 size_bytes 带过来：分段预分配和进度条首帧都靠它。
+	 */
 	static hfDownloadStart(
 		repo: string,
 		filename: string,
-		destName?: string
+		destName?: string,
+		totalBytes = 0
 	): Promise<HfJobResponse> {
 		return managerFetch<HfJobResponse>('/api/hf-download', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ repo, filename, dest_name: destName })
+			body: JSON.stringify({ repo, filename, dest_name: destName, total_bytes: totalBytes })
 		});
 	}
 

@@ -1044,6 +1044,11 @@
     'Failed': '失败',
     'Fits': '可上卡',
     "Won't fit": '装不下',
+    // 排序下拉 + 多连接加速标记（第 2 批 A 增强）
+    'Most downloads': '最多下载',
+    'Most likes': '最多收藏',
+    'Recently updated': '最近更新',
+    'connections': '线程加速',
     'KV estimated from layer counts - hybrid-attention models can be overstated several times.': 'KV 按层数结构估算 —— 混合注意力模型（如 Qwen3.5）可能被高估好几倍。',
     'Measuring this model on your GPU…': '正在本卡上实测这个模型…',
     'Models on disk': '磁盘上的模型',

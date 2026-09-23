@@ -83,15 +83,16 @@ export const SIDEBAR_ACTIONS_ITEMS: DesktopIconStripItem[] = [
 		activeUrlIncludes: ROUTES.PARAMETERS
 	},
 	{
-		icon: Settings,
-		route: ROUTES.SETTINGS,
-		tooltip: 'Settings',
-		activeUrlIncludes: ROUTES.SETTINGS
-	},
-	{
+		// 「模型下载」排在「设置」上方：下载是高频动作，设置是低频兜底 → 沉底。
 		icon: Download,
 		route: ROUTES.DOWNLOAD,
 		tooltip: 'Model Download',
 		activeUrlIncludes: ROUTES.DOWNLOAD
+	},
+	{
+		icon: Settings,
+		route: ROUTES.SETTINGS,
+		tooltip: 'Settings',
+		activeUrlIncludes: ROUTES.SETTINGS
 	}
 ];

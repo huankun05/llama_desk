@@ -80,6 +80,7 @@ await page
 // 搜索走外网，放宽到 30s
 await page.waitForFunction(
 	() => /Qwen\/Qwen2\.5-0\.5B-Instruct-GGUF/.test(document.body.innerText || ''),
+	undefined,
 	{ timeout: 30000 }
 );
 text = await bodyText();
@@ -95,6 +96,7 @@ await page
 	.click();
 await page.waitForFunction(
 	() => /\.gguf/.test(document.body.innerText || '') && /GB/.test(document.body.innerText || ''),
+	undefined,
 	{ timeout: 30000 }
 );
 text = await bodyText();
@@ -114,11 +116,13 @@ await page.waitForFunction(
 	() =>
 		/(下载任务|Downloads)/.test(document.body.innerText || '') &&
 		/取消|Cancel/.test(document.body.innerText || ''),
+	undefined,
 	{ timeout: 20000 }
 );
 // 等一两个轮询拍，让 total/速度从 0 变成真实值
 await page.waitForFunction(
 	() => !/0 MB \/ 0 MB/.test(document.body.innerText || ''),
+	undefined,
 	{ timeout: 20000 }
 );
 text = await bodyText();
@@ -132,7 +136,8 @@ if ((await cancelBtn.count()) > 0) {
 	await cancelBtn.click();
 	await page.waitForFunction(
 		() => /已取消|Canceled/.test(document.body.innerText || ''),
-		{ timeout: 15000 }
+		undefined,
+		{ timeout: 25000 }
 	);
 	text = await bodyText();
 	check('任务变为已取消', /已取消|Canceled/.test(text));

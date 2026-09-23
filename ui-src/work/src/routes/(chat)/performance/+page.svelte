@@ -3060,7 +3060,10 @@
 								① 桌面与其他程序白占的那块（本机空载约 1.9 GB）；
 								② 「全层上卡线」在哪（线右边还得放得下桌面占用才算装得下）；
 								③ 装不下时超了多少。
-								⚠️ 这是空间占比、不是涨跌 → 中性/主题色梯度（primary 不同透明度 + muted）。
+								⚠️ 配色：最初用 primary 透明度梯度，浅色主题下 primary≈纯黑，
+								权重段糊成一根黑条（用户反馈「中间那个黑色的条不舒服」）→
+								改用主题 chart-1/2/4 色板（明暗主题各自调和）+ 段间 1px 缝隙；
+								桌面段保持中性灰——它不是「我们」占的。
 							-->
 							{#if vramBudget}
 								<div class="mt-4">
@@ -3090,17 +3093,18 @@
 											? 'ring-1 ring-red-500/60'
 											: ''}"
 									>
-										<div class="flex h-full w-full">
+										<!-- gap-px：让相邻段之间露出 1px 底色，肉眼可分（否则深浅段糊成一块） -->
+										<div class="flex h-full w-full gap-px">
 											<div
-												class="h-full bg-primary transition-all"
+												class="h-full bg-chart-2 transition-all"
 												style="width: {(vramBudget.weights / vramBudget.total) * 100}%"
 											></div>
 											<div
-												class="h-full bg-primary/60 transition-all"
+												class="h-full bg-chart-1 transition-all"
 												style="width: {(vramBudget.kv / vramBudget.total) * 100}%"
 											></div>
 											<div
-												class="h-full bg-primary/30 transition-all"
+												class="h-full bg-chart-4 transition-all"
 												style="width: {(vramBudget.overhead / vramBudget.total) * 100}%"
 											></div>
 											<div
@@ -3123,19 +3127,19 @@
 										class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground"
 									>
 										<span class="inline-flex items-center gap-1">
-											<span class="h-2 w-2 shrink-0 rounded-sm bg-primary"></span>
+											<span class="h-2 w-2 shrink-0 rounded-sm bg-chart-2"></span>
 											<span>Model Weights</span>
 											<span class="font-mono text-foreground"
 												>{vramBudget.weights.toFixed(2)}</span
 											>
 										</span>
 										<span class="inline-flex items-center gap-1">
-											<span class="h-2 w-2 shrink-0 rounded-sm bg-primary/60"></span>
+											<span class="h-2 w-2 shrink-0 rounded-sm bg-chart-1"></span>
 											<span>KV Cache</span>
 											<span class="font-mono text-foreground">{vramBudget.kv.toFixed(2)}</span>
 										</span>
 										<span class="inline-flex items-center gap-1">
-											<span class="h-2 w-2 shrink-0 rounded-sm bg-primary/30"></span>
+											<span class="h-2 w-2 shrink-0 rounded-sm bg-chart-4"></span>
 											<span>Buffers &amp; overhead</span>
 											<span class="font-mono text-foreground"
 												>{vramBudget.overhead.toFixed(2)}</span
@@ -3160,6 +3164,29 @@
 											</span>
 										{/if}
 									</div>
+
+									{#if vramBudget.overflow > 0}
+										<!--
+											「为什么超出」必须把算术摆出来：上面的百分比只是模型占整卡，
+											超出是「模型 + 桌面已占」一起算的（用户实测反馈看不懂）。
+											复用图例里已有的词条（Model Weights / Desktop & other apps），
+											静态词独占文本节点，overlay 才能整节点等值匹配。
+										-->
+										<div class="mt-1 text-[11px] text-red-500/90">
+											<span>Model Weights</span>
+											<span class="font-mono"> {vramBudget.weights.toFixed(2)} </span>
+											<span>+</span>
+											<span class="font-mono"> KV {vramBudget.kv.toFixed(2)} </span>
+											<span>+</span>
+											<span>Desktop &amp; other apps</span>
+											<span class="font-mono"> {vramBudget.desktop.toFixed(2)} </span>
+											<span>=</span>
+											<span class="font-mono">
+												{(vramBudget.modelNeed + vramBudget.desktop).toFixed(2)} /
+												{vramBudget.total.toFixed(1)} GB</span
+											>
+										</div>
+									{/if}
 								</div>
 							{/if}
 

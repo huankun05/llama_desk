@@ -308,8 +308,8 @@ say(`  设置页分节: ${JSON.stringify(sectionTitles)}`);
 check('设置页**没有**「性能」节', !sectionTitles.some((t) => /性能|Performance/.test(t)));
 check('设置页仍有「通用」节', sectionTitles.some((t) => /通用|General/.test(t)));
 
-/** 内容区（max-w-2xl 那一栏）里的折叠按钮 */
-const panelHeads = page.locator('div.max-w-2xl button[aria-expanded]');
+/** 内容区（max-w-3xl 那一栏）里的折叠按钮 */
+const panelHeads = page.locator('div.max-w-3xl button[aria-expanded]');
 
 check('设置页面板有可折叠标题', (await panelHeads.count()) > 0, `count=${await panelHeads.count()}`);
 
@@ -339,7 +339,7 @@ if (await panelHeads.count()) {
 		await page.waitForTimeout(900);
 
 		const devExpanded = await page
-			.locator('div.max-w-2xl button[aria-expanded]')
+			.locator('div.max-w-3xl button[aria-expanded]')
 			.first()
 			.getAttribute('aria-expanded');
 
