@@ -2440,18 +2440,23 @@ def hf_http_json(url, timeout=20):
         return json.loads(r.read().decode("utf-8"))
 
 
-def hf_search(q, limit=30, sort="downloads"):
+def hf_search(q, limit=30, sort="downloads", skip=0):
     """搜 GGUF 仓库。
 
     模糊性：HF 的 search 只对 id 做**子串**匹配，不拆词 —— 直接搜 "qwen" 时，
     按下载量取前 30 几乎全被 Qwen 官方非 GGUF 仓占据，再被 gguf 标签过滤后
     只剩两三条（用户实测反馈「搜索结果太少」）。所以这里自动把 " gguf" 追加
     到查询词后面 —— HF 搜索对多词是 AND 语义，结果基本只剩 GGUF 仓。
+    skip：HF API 原生偏移（前端「加载更多」翻页用）。
     """
     try:
         limit = max(1, min(int(limit), 50))
     except (TypeError, ValueError):
         limit = 30
+    try:
+        skip = max(0, int(skip))
+    except (TypeError, ValueError):
+        skip = 0
     if sort not in ("downloads", "likes", "lastModified"):
         sort = "downloads"
     try:
@@ -2459,8 +2464,8 @@ def hf_search(q, limit=30, sort="downloads"):
         if q and "gguf" not in q.lower():
             q = q + " gguf"
         qstr = urllib.parse.quote(q)
-        url = "%s/models?search=%s&limit=%d&sort=%s&direction=-1" % (
-            HF_API, qstr, limit, sort)
+        url = "%s/models?search=%s&limit=%d&skip=%d&sort=%s&direction=-1" % (
+            HF_API, qstr, limit, skip, sort)
         data = hf_http_json(url)
     except Exception:
         return []
@@ -3159,9 +3164,13 @@ class Handler(BaseHTTPRequestHandler):
                     limit = int(qs.get("limit", ["30"])[0])
                 except (TypeError, ValueError):
                     limit = 30
+                try:
+                    skip = int(qs.get("skip", ["0"])[0])
+                except (TypeError, ValueError):
+                    skip = 0
                 sort = qs.get("sort", ["downloads"])[0]
                 self.json(200, {"ok": True, "query": q,
-                                "results": hf_search(q, limit, sort)})
+                                "results": hf_search(q, limit, sort, skip)})
             elif p == "/api/hf-files":
                 repo = parse_qs(u.query).get("repo", [""])[0]
                 if not repo:

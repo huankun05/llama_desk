@@ -851,9 +851,13 @@ webui/manager_pkg/
 >   **删除已下载任务记录**（`POST /api/hf-download/<id>/remove`，仅终态可删，进行中回 409）、
 >   ✅ **磁盘余量检查**（`hf_download_start` 里 `shutil.disk_usage`，不足 total+2GB 拒绝并
 >   400 报「需要 X GB，仅剩 Y GB」——route 捕 ValueError，不是 500）；
-> - **按量化档筛选**（Q4_K_M / Q8_0 / …）：文件名可判，暂缓（大小筛选已覆盖主要诉求）；
-> - 结果**分页/加载更多**（现在一次 limit 条）；`/api/hf-search` 补 `min_size/max_size` 参数更干净；
-> - 多选/批量下载、下载完成一键「去加载」（跳转模型页）。
+> - **按量化档筛选**（Q4_K_M / Q8_0 / …）：与大小高度相关，暂缓；
+> - ~~结果**分页/加载更多**~~ ✅（`/api/hf-search` 补 `skip` 参数（HF API 原生偏移），
+>   结果卡底部「加载更多」，返回不满一页自动收起）；
+> - ~~多选/批量下载、下载完成一键「去加载」~~ → **去加载 ✅**（completed 卡「Load model」
+>   → `modelsStore.fetch(true)` 刷新 → 按完整路径/文件名/别名三级匹配 → `selectModelById`
+>   + router 模式 `status.load` → `goto(#/)`；匹配不上也跳回，那边有完整选择器）。
+>   批量下载暂缓（场景少见、状态管理翻倍）。
 >
 > **顺手修的两个环境硬伤（9-24）**：
 > - **镜像支持**：`HF_API_BASE` 环境变量（如 `https://hf-mirror.com`，完整反代、路径同构），

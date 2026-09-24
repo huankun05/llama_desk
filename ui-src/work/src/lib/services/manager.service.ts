@@ -473,13 +473,20 @@ export class ManagerService {
 	/**
 	 * 搜 GGUF 仓库。q 为空时返回热门 GGUF（浏览用）。
 	 * sort: downloads | likes | lastModified（后端会自动给 q 追加 " gguf"）。
+	 * skip: HF API 原生偏移，「加载更多」翻页用。
 	 */
 	static hfSearch(
 		q: string,
 		limit = 30,
-		sort: 'downloads' | 'likes' | 'lastModified' = 'downloads'
+		sort: 'downloads' | 'likes' | 'lastModified' = 'downloads',
+		skip = 0
 	): Promise<HfSearchResponse> {
-		const qs = new URLSearchParams({ q, limit: String(limit), sort }).toString();
+		const qs = new URLSearchParams({
+			q,
+			limit: String(limit),
+			sort,
+			skip: String(skip)
+		}).toString();
 
 		return managerFetch<HfSearchResponse>(`/api/hf-search?${qs}`);
 	}

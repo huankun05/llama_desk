@@ -88,9 +88,73 @@ await page.waitForFunction(
 text = await bodyText();
 check('搜索结果包含目标仓库', /Qwen\/Qwen2\.5-0\.5B-Instruct-GGUF/.test(text));
 check('结果带下载量统计（下载/收藏 词条命中）', /下载|downloads/.test(text));
+// skip 分页：API 级 —— skip=0 与 skip=5 的首条必须不同（HF API 原生偏移）
+const s0 = await page.request.get(
+	`${BASE.replace(/:\d+$/, '')}:8090/api/hf-search?q=gguf&limit=3&skip=0`
+);
+const s5 = await page.request.get(
+	`${BASE.replace(/:\d+$/, '')}:8090/api/hf-search?q=gguf&limit=3&skip=5`
+);
+const j0 = await s0.json().catch(() => ({}));
+const j5 = await s5.json().catch(() => ({}));
+const first0 = j0.results?.[0]?.id;
+const first5 = j5.results?.[0]?.id;
+check(
+	'skip 偏移生效（skip=0 与 skip=5 首条不同）',
+	Boolean(first0 && first5 && first0 !== first5),
+	`${first0} vs ${first5}`
+);
 await page.screenshot({ path: `${OUT}/01-search-results.png` });
 
+say('场景 3b：「加载更多」翻页（UI，大范围搜索必有第二页）');
+await input.fill('qwen gguf');
+await page
+	.getByRole('button', { name: /^(搜索|Search)$/ })
+	.first()
+	.click();
+await page.waitForFunction(
+	() => /加载更多|Load more/.test(document.body.innerText || ''),
+	undefined,
+	{ timeout: 30000 }
+);
+// 结果卡 = 页面上最后一个 rounded-lg 卡片；未展开时每个 repo 一行 li
+const resultRows = () =>
+	page.locator('div.rounded-lg').last().locator(':scope > ul > li').count();
+const rowsBefore = await resultRows();
+await page
+	.getByRole('button', { name: /^(加载更多|Load more)$/ })
+	.first()
+	.click();
+// 轮询行数增加（第二页查询走外网 2~5s+，固定 sleep 会假阴性）
+await page.waitForFunction(
+	(n) => {
+		const cards = document.querySelectorAll('div.rounded-lg');
+		const last = cards[cards.length - 1];
+
+		if (!last) return false;
+		const ul = last.querySelector(':scope > ul');
+
+		return ul ? ul.children.length > n : false;
+	},
+	rowsBefore,
+	{ timeout: 45000 }
+);
+const rowsAfter = await resultRows();
+check('加载更多后结果行数增加', rowsAfter > rowsBefore, `${rowsBefore} -> ${rowsAfter}`);
+await page.screenshot({ path: `${OUT}/08-load-more.png` });
+
 say('场景 4：展开仓库看量化清单');
+// 3b 换过搜索词 —— 搜回目标仓库再展开
+await input.fill('qwen2.5 0.5b gguf');
+await page
+	.getByRole('button', { name: /^(搜索|Search)$/ })
+	.first()
+	.click();
+await page.waitForFunction(
+	() => /Qwen\/Qwen2\.5-0\.5B-Instruct-GGUF/.test(document.body.innerText || ''),
+	undefined,
+	{ timeout: 30000 }
+);
 await page
 	.locator('button')
 	.filter({ hasText: /Qwen\/Qwen2\.5-0\.5B-Instruct-GGUF/ })
@@ -219,6 +283,41 @@ check(
 	diskResp.status() === 400 && /磁盘空间不足/.test(diskJson.error || ''),
 	`status=${diskResp.status()} error=${(diskJson.error || '').slice(0, 60)}`
 );
+
+say('场景 9：真实下载到完成 → 「去加载」跳转对话页');
+// 场景 5 还停在 0.5B 仓库展开态；重新点最小量化（场景 5 排序切成升序 → 最小量化在最后？升序后最后一个 = 最大 fp16 1.18GB！）
+// 显式点「升序后的第一个」（= 0.39GB 最小量化）—— 同时顺便回归断点续传：场景 7 取消留过同文件 sidecar
+const dlButtons2 = page.getByRole('button', { name: /^(下载|Download)$/ });
+const m = await dlButtons2.count();
+say(`  共 ${m} 个下载按钮，点第一个（升序后 = 最小量化，续传场景 7 的残留）`);
+await dlButtons2.nth(0).click();
+// 等任务卡出现再等真正完成（0.39GB @ ~25MB/s ≈ 20s；续传更快）
+await page.waitForFunction(
+	() => /(下载任务|Downloads)/.test(document.body.innerText || ''),
+	undefined,
+	{ timeout: 20000 }
+);
+await page.waitForFunction(
+	() => /已完成|Completed/.test(document.body.innerText || ''),
+	undefined,
+	{ timeout: 120000 }
+);
+text = await bodyText();
+check('下载到完成（已完成状态）', /已完成|Completed/.test(text));
+await page.screenshot({ path: `${OUT}/09-completed.png` });
+// 终态 completed 卡上应有「加载模型」按钮 —— 点击后应跳回对话页根
+const loadBtn = page.getByRole('button', { name: /加载模型|Load model/ }).first();
+if ((await loadBtn.count()) > 0) {
+	await loadBtn.click();
+	await page.waitForURL(/#\/($|\?)/, { timeout: 20000 }).catch(() => {});
+	check('去加载后跳转对话页', /#\/($|\?)/.test(page.url()), page.url());
+	await page.waitForTimeout(1500);
+	text = await bodyText();
+	check('对话页正常渲染（侧栏在）', (await page.locator('aside').count()) > 0);
+	await page.screenshot({ path: `${OUT}/10-after-load.png` });
+} else {
+	check('去加载后跳转对话页', false, 'completed 卡上没有「加载模型」按钮');
+}
 
 check('无页面 JS 错误', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 

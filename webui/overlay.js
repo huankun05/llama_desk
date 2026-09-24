@@ -1057,6 +1057,7 @@
     'Open folder': '打开文件夹',
     'Delete record': '删除记录',
     'No files match this size filter.': '没有符合该大小筛选的文件。',
+    'Load more': '加载更多',
     'KV estimated from layer counts - hybrid-attention models can be overstated several times.': 'KV 按层数结构估算 —— 混合注意力模型（如 Qwen3.5）可能被高估好几倍。',
     'Measuring this model on your GPU…': '正在本卡上实测这个模型…',
     'Models on disk': '磁盘上的模型',

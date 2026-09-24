@@ -18,22 +18,34 @@
 		Download as DownloadIcon,
 		FolderOpen,
 		LoaderCircle,
+		Play,
 		Search,
 		Trash2,
 		TriangleAlert
 	} from '@lucide/svelte';
+	import { goto } from '$app/navigation';
 	import { Button } from '$lib/components/ui/button';
 	import * as Select from '$lib/components/ui/select';
-	import { APP_NAME } from '$lib/constants';
+	import { APP_NAME, ROUTES } from '$lib/constants';
 	import { ManagerService } from '$lib/services';
 	import type { HfFileSummary, HfJob, HfRepoSummary } from '$lib/services';
-	import { DEFAULT_LAUNCH_CONFIG, estimateVram, type LaunchConfig } from '$lib/stores';
+	import {
+		DEFAULT_LAUNCH_CONFIG,
+		estimateVram,
+		modelsStore,
+		serverStore,
+		type LaunchConfig
+	} from '$lib/stores';
 	import { onMount } from 'svelte';
 
 	let query = $state('');
 	let searching = $state(false);
 	let searchError = $state<string | null>(null);
 	let results = $state<HfRepoSummary[]>([]);
+	/** 「加载更多」翻页：skip = 已有结果数；返回不满一页说明到底了 */
+	let loadingMore = $state(false);
+	let moreAvailable = $state(false);
+	let loadModelError = $state<string | null>(null);
 	let expanded = $state<string | null>(null);
 	let filesByRepo = $state<Record<string, HfFileSummary[]>>({});
 	let loadingFiles = $state<Record<string, boolean>>({});
@@ -111,19 +123,41 @@
 		};
 	});
 
+	const PAGE_SIZE = 30;
+
 	async function doSearch(): Promise<void> {
 		searching = true;
 		searchError = null;
 
 		try {
-			const r = await ManagerService.hfSearch(query.trim(), 30, sortBy);
+			const r = await ManagerService.hfSearch(query.trim(), PAGE_SIZE, sortBy, 0);
 
 			results = r.results;
+			moreAvailable = r.results.length >= PAGE_SIZE;
 		} catch (e) {
 			searchError = e instanceof Error ? e.message : String(e);
 			results = [];
+			moreAvailable = false;
 		} finally {
 			searching = false;
+		}
+	}
+
+	/** 「加载更多」：skip 接在现有结果后面，追加而非替换 */
+	async function loadMore(): Promise<void> {
+		if (loadingMore) return;
+		loadingMore = true;
+		searchError = null;
+
+		try {
+			const r = await ManagerService.hfSearch(query.trim(), PAGE_SIZE, sortBy, results.length);
+
+			results = [...results, ...r.results];
+			moreAvailable = r.results.length >= PAGE_SIZE;
+		} catch (e) {
+			searchError = e instanceof Error ? e.message : String(e);
+		} finally {
+			loadingMore = false;
 		}
 	}
 
@@ -223,6 +257,43 @@
 		void ManagerService.openPath(j.dest).catch(() => {});
 	}
 
+	/**
+	 * 「去加载」：刷新模型列表 → 按完整路径精确匹配刚下载的模型（id/model/
+	 * 别名兜底，文件名 stem 兜底）→ 选中并在 router 模式下立即开载 → 跳回对话页。
+	 * 匹配不上也跳回 —— 那边有完整的模型选择器，用户手动选即可。
+	 */
+	async function loadDownloaded(j: HfJob): Promise<void> {
+		loadModelError = null;
+
+		try {
+			await modelsStore.fetch(true);
+
+			const stem = j.filename.replace(/\.gguf$/i, '');
+			const byDest = (x: (typeof modelsStore.models)[number]): boolean =>
+				x.id === j.dest || x.model === j.dest;
+			const bySuffix = (x: (typeof modelsStore.models)[number]): boolean =>
+				x.id.endsWith(j.filename) || x.model.endsWith(stem);
+			const byAlias = (x: (typeof modelsStore.models)[number]): boolean =>
+				(x.aliases ?? []).some((a: string) => a.endsWith(stem));
+			const m =
+				modelsStore.models.find(byDest) ??
+				modelsStore.models.find(bySuffix) ??
+				modelsStore.models.find(byAlias);
+
+			if (m) {
+				await modelsStore.selectModelById(m.id);
+
+				if (serverStore.isRouterMode && !modelsStore.isModelLoaded(m.id)) {
+					void modelsStore.status.load(m.id);
+				}
+			}
+
+			await goto(ROUTES.START);
+		} catch (e) {
+			loadModelError = e instanceof Error ? e.message : String(e);
+		}
+	}
+
 	/** 展开区文件列表：先按大小筛、再按大小排序 */
 	function visibleFiles(repo: string): HfFileSummary[] {
 		const list = (filesByRepo[repo] ?? []).filter((f) => {
@@ -302,6 +373,8 @@
 		<p class="mb-4 text-sm text-red-500">{searchError}</p>
 	{:else if startError}
 		<p class="mb-4 text-sm text-red-500">{startError}</p>
+	{:else if loadModelError}
+		<p class="mb-4 text-sm text-red-500">{loadModelError}</p>
 	{/if}
 
 	<!-- 下载任务（进行中 + 本次会话完成的） -->
@@ -357,6 +430,10 @@
 									</Button>
 								{:else}
 									{#if j.status === 'completed'}
+										<Button variant="ghost" size="sm" onclick={() => void loadDownloaded(j)}>
+											<Play class="h-3.5 w-3.5" />
+											<span>Load model</span>
+										</Button>
 										<Button variant="ghost" size="sm" onclick={() => openFolder(j)}>
 											<FolderOpen class="h-3.5 w-3.5" />
 											<span>Open folder</span>
@@ -489,6 +566,22 @@
 						{/if}
 					</li>
 				{/each}
+				<!-- 翻页：只有当前查询、结果不满一页时收起 -->
+				{#if results.length > 0 && moreAvailable}
+					<li class="flex justify-center py-3">
+						<Button
+							variant="ghost"
+							size="sm"
+							disabled={loadingMore}
+							onclick={() => void loadMore()}
+						>
+							{#if loadingMore}
+								<LoaderCircle class="h-4 w-4 animate-spin" />
+							{/if}
+							Load more
+						</Button>
+					</li>
+				{/if}
 			</ul>
 		{/if}
 	</div>
