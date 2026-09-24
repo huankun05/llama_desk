@@ -8,7 +8,8 @@
  *   ② 侧边栏出现「模型下载」入口（折叠态是图标 + title，展开态是文字）；
  *   ③ 搜索 "qwen2.5 0.5b gguf" 能返回结果列表（真实 HF API）；
  *   ④ 展开仓库能拉到 .gguf 文件清单（大小 + 可上卡徽章）；
- *   ⑤ 文件列表大小筛选 chips（>6GB → 空态文案；全部大小 → 文件回来）+ 排序方向切换；
+ *   ⑤ 搜索前筛选条：大小区间 chips（全部/<3GB/3-6GB/>6GB）+ 量化档下拉（后端在仓库维度过滤）；
+ *      展开区仅保留排序方向切换；卡片新增「N quants · min–max GB · Fits/装不下」摘要；
  *   ⑥ 点「下载」会创建任务并出现进度条（下载任务卡片）；
  *   ⑦ 取消按钮可把任务停掉（已取消）→ 终态卡片出现「删除记录」→ 点击后卡片消失；
  *   ⑧ 磁盘余量检查：POST total_bytes=99TB → 400 且报明确数字（不打 UI，直接打 manager API）。
@@ -28,7 +29,7 @@ const { chromium } = require('playwright');
 const CHROME =
 	'C:/Users/shangmeng/AppData/Local/ms-playwright/chromium-1243/chrome-win64/chrome.exe';
 const BASE = process.env.PROBE_BASE || 'http://127.0.0.1:8080';
-const OUT = 'diag/shots-20260923-download';
+const OUT = 'diag/shots-20260924-download';
 
 const ok = [];
 const bad = [];
@@ -88,6 +89,11 @@ await page.waitForFunction(
 text = await bodyText();
 check('搜索结果包含目标仓库', /Qwen\/Qwen2\.5-0\.5B-Instruct-GGUF/.test(text));
 check('结果带下载量统计（下载/收藏 词条命中）', /下载|downloads/.test(text));
+// 卡片摘要：搜索带回 gguf_files → 渲染 "N quants · min–max GB · Fits/装不下"
+check(
+	'卡片摘要渲染（N quants · GB · Fits/装不下）',
+	/quants|个量化/.test(text) && /GB/.test(text) && /Fits|可上卡|Won't fit|装不下/.test(text)
+);
 // skip 分页：API 级 —— skip=0 与 skip=5 的首条必须不同（HF API 原生偏移）
 const s0 = await page.request.get(
 	`${BASE.replace(/:\d+$/, '')}:8090/api/hf-search?q=gguf&limit=3&skip=0`
@@ -172,47 +178,56 @@ check('可上卡徽章（小模型应 Fits）', /可上卡|Fits/.test(text));
 check('下载按钮存在', /下载|Download/.test(text));
 await page.screenshot({ path: `${OUT}/02-files-with-badges.png` });
 
-say('场景 5：文件列表大小筛选 + 排序切换');
-text = await bodyText();
-check(
-	'筛选条出现（0.5B 仓库多量化 → 多于 1 个文件）',
-	/全部大小|All sizes/.test(text) && /< 3 GB/.test(text)
-);
-// '> 6 GB'：0.5B 模型全部量化都在 6GB 以下 → 必出空态文案
-await page
-	.getByRole('button', { name: /^> 6 GB$/ })
-	.first()
-	.click();
-await page.waitForFunction(
-	() => /没有符合该大小筛选|No files match/.test(document.body.innerText || ''),
-	undefined,
-	{ timeout: 5000 }
-);
-text = await bodyText();
-check("'> 6 GB' 筛选出空态文案", /没有符合该大小筛选|No files match/.test(text));
-// 排序方向按钮：点一下切回升序（图标切换，无文字 —— 靠 GB 序列验证）
+say('场景 4b：展开区文件列表排序方向切换');
 const gbSeq = () =>
 	page.$$eval('ul ul span.font-mono', (els) =>
 		els.map((e) => parseFloat(e.textContent || '0')).filter((v) => !Number.isNaN(v))
 	);
-// 先回到全部大小，让列表有内容
-await page
-	.getByRole('button', { name: /^(全部大小|All sizes)$/ })
-	.first()
-	.click();
-await page.waitForFunction(
-	() => !/没有符合该大小筛选|No files match/.test(document.body.innerText || ''),
-	undefined,
-	{ timeout: 5000 }
-);
 const seq0 = await gbSeq();
 check('默认排序为大到小', seq0.length >= 2 && seq0[0] >= seq0[seq0.length - 1], JSON.stringify(seq0));
-await page.locator('button.ml-auto').first().click();
+await page.locator('button[aria-label="toggle size sort"]').first().click();
 await page.waitForTimeout(300);
 const seq1 = await gbSeq();
-check('点击后反转为小到大', seq1[0] <= seq1[seq1.length - 1], JSON.stringify(seq1));
-check('筛选空态不残留文件', seq1.length === seq0.length);
-await page.screenshot({ path: `${OUT}/05-size-filter-sort.png` });
+check('点击后反转为小到大', seq1.length >= 2 && seq1[0] <= seq1[seq1.length - 1], JSON.stringify(seq1));
+await page.screenshot({ path: `${OUT}/05-sort.png` });
+
+say('场景 5：搜索前筛选条（大小区间 + 量化档）');
+text = await bodyText();
+// 筛选条始终在搜索框下方，含 4 个大小 chips + 量化下拉
+check(
+	'筛选条含大小区间 chips',
+	/All sizes|全部大小/.test(text) && /< 3 GB/.test(text) && /3-6 GB/.test(text) && /> 6 GB/.test(text)
+);
+check('筛选条含量化下拉（All quants）', /All quants|全部量化/.test(text));
+
+// 后端契约：min_gb/max_gb/quant 真的在仓库维度过滤（搜索前就生效）
+const fResp = await page.request.get(
+	`${BASE.replace(/:\d+$/, '')}:8090/api/hf-search?q=gguf&limit=20&min_gb=3&max_gb=6`
+);
+const fj = await fResp.json().catch(() => ({}));
+const fResults = fj.results || [];
+const within = fResults.filter((r) =>
+	(r.gguf_files || []).some((f) => !f.is_mmproj && f.size_gb >= 3 && f.size_gb <= 6)
+);
+check(
+	'min_gb/max_gb 仓库维度过滤（返回仓库都含 3-6GB 量化）',
+	fResults.length > 0 && within.length === fResults.length,
+	`matched=${fResults.length} within=${within.length}`
+);
+const qResp = await page.request.get(
+	`${BASE.replace(/:\d+$/, '')}:8090/api/hf-search?q=gguf&limit=20&quant=Q4_K_M`
+);
+const qj = await qResp.json().catch(() => ({}));
+const qResults = qj.results || [];
+const qok = qResults.every((r) =>
+	(r.gguf_files || []).some((f) => /Q4_K_M/i.test(f.filename))
+);
+check(
+	'quant 量化档过滤（返回仓库都含 Q4_K_M）',
+	qResults.length > 0 && qok,
+	`matched=${qResults.length}`
+);
+await page.screenshot({ path: `${OUT}/05-search-before-filter.png` });
 
 say('场景 6：点下载 → 任务卡片 + 进度条');
 // 选最小的那个量化（列表按大小降序 → 最后一个非 mmproj 文件）

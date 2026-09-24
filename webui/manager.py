@@ -16,6 +16,7 @@ import os, sys, re, json, time, uuid, subprocess, threading, math, socket, gzip,
 import urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+from concurrent.futures import ThreadPoolExecutor
 
 WEBUI_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIRS = [
@@ -2440,14 +2441,78 @@ def hf_http_json(url, timeout=20):
         return json.loads(r.read().decode("utf-8"))
 
 
-def hf_search(q, limit=30, sort="downloads", skip=0):
-    """搜 GGUF 仓库。
+_HF_SEARCH_CACHE = {}  # (q,sort) -> {"candidates":[{id,downloads,likes,lastModified,names}], "scanned":int, "exhausted":bool}
+_HF_FILES_CACHE = {}   # repo -> {"files":[...], "ts":float}  （hf_files 进程内缓存，避免重复拉 ?blobs=true）
+_HF_FILES_CACHE_TTL = 600
 
-    模糊性：HF 的 search 只对 id 做**子串**匹配，不拆词 —— 直接搜 "qwen" 时，
-    按下载量取前 30 几乎全被 Qwen 官方非 GGUF 仓占据，再被 gguf 标签过滤后
-    只剩两三条（用户实测反馈「搜索结果太少」）。所以这里自动把 " gguf" 追加
-    到查询词后面 —— HF 搜索对多词是 AND 语义，结果基本只剩 GGUF 仓。
-    skip：HF API 原生偏移（前端「加载更多」翻页用）。
+
+def _hf_repo_names(m):
+    """从 HF 搜索返回的仓库对象（full=true）抽出 .gguf 文件名列表。
+
+    注意：full=true 的 siblings **不含 lfs.size**（实测 28 个文件 size 全为 0），
+    真实大小必须走 hf_files(?blobs=true)。这里只取文件名，供量化档免费过滤。
+    """
+    out = []
+    for s in (m.get("siblings") or []):
+        fn = s.get("rfilename") or ""
+        if fn.lower().endswith(".gguf"):
+            out.append(fn)
+    return out
+
+
+def _hf_fetch_files_batch(repos):
+    """并发拉取一批仓库的 hf_files，返回 {repo: files}。失败记空列表。"""
+    if not repos:
+        return {}
+    res = {}
+    n = min(16, max(1, len(repos)))
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        fut = {ex.submit(hf_files, r): r for r in repos}
+        for f in fut:
+            r = fut[f]
+            try:
+                res[r] = f.result()
+            except Exception:
+                res[r] = []
+    return res
+
+
+def _hf_repo_passes(files, min_gb, max_gb, quant):
+    """「搜索前筛选」的命中判据：仓库里是否**存在**一个落在大小区间 / 命中量化档的 .gguf。
+
+    一个模型家族仓库通常含多个量化，用户要的是「有我想要的那档」——
+    只要任意一份文件满足大小区间（与/或）量化档即保留。
+    """
+    if not files:
+        return False
+    if quant:
+        q = quant.lower()
+        if not any(q in f["filename"].lower() for f in files):
+            return False
+    if min_gb is not None or max_gb is not None:
+        hit = False
+        for f in files:
+            g = f["size_gb"]
+            if g <= 0:
+                continue
+            if (min_gb is None or g >= min_gb) and (max_gb is None or g <= max_gb):
+                hit = True
+                break
+        if not hit:
+            return False
+    return True
+
+
+def hf_search(q, limit=30, sort="downloads", skip=0, min_gb=None, max_gb=None, quant=None):
+    """搜 GGUF 仓库，支持「搜索前筛选」：大小区间（min_gb/max_gb）+ 量化档（quant）。
+
+    设计（修正了 full=true 不含 lfs.size 的坑）：
+    ① 搜索用 full=true 只拿候选仓库 + 文件名（量化档用文件名**免费**过滤）；
+       大小所需的真实尺寸来自 ?blobs=true（hf_files），按需**并发**拉取并缓存。
+    ② 量化档 = 文件名子串匹配（免费）；大小区间 = 仓库里存在一份落在区间的 .gguf。
+    ③ 筛选后的翻页跨 HF 原始分页：候选列表按 (q,sort) 进程内缓存，
+       大小筛选在读取时按需应用，load more 复用，避免每次重扫。
+    返回 (results, has_more)。
     """
     try:
         limit = max(1, min(int(limit), 50))
@@ -2459,51 +2524,104 @@ def hf_search(q, limit=30, sort="downloads", skip=0):
         skip = 0
     if sort not in ("downloads", "likes", "lastModified"):
         sort = "downloads"
-    try:
-        q = (q or "").strip()
-        if q and "gguf" not in q.lower():
-            q = q + " gguf"
-        qstr = urllib.parse.quote(q)
-        url = "%s/models?search=%s&limit=%d&skip=%d&sort=%s&direction=-1" % (
-            HF_API, qstr, limit, skip, sort)
-        data = hf_http_json(url)
-    except Exception:
-        return []
-    out = []
-    for m in data:
-        tags = [str(t).lower() for t in (m.get("tags") or [])]
-        if "gguf" not in tags:
-            continue
-        out.append({
-            "id": m.get("id"),
-            "downloads": m.get("downloads") or 0,
-            "likes": m.get("likes") or 0,
-            "lastModified": m.get("lastModified"),
-        })
-    return out
+    q = (q or "").strip()
+    if q and "gguf" not in q.lower():
+        q = q + " gguf"
+    qstr = urllib.parse.quote(q)
+    cache = _HF_SEARCH_CACHE.get((q, sort))
+    if cache is None or skip == 0:
+        cache = {"candidates": [], "scanned": 0, "exhausted": False}
+        _HF_SEARCH_CACHE[(q, sort)] = cache
+    cap = 800
+    # Phase 1：收集候选（仅文件名，免费）—— 直到攒够 skip+limit*3 或扫完。
+    while (not cache["exhausted"]) and cache["scanned"] < cap and (
+        len(cache["candidates"]) < skip + limit * 3
+    ):
+        url = "%s/models?search=%s&filter=gguf&sort=%s&direction=-1&full=true&limit=100&skip=%d" % (
+            HF_API, qstr, sort, cache["scanned"])
+        try:
+            data = hf_http_json(url)
+        except Exception:
+            cache["exhausted"] = True
+            break
+        if not data:
+            cache["exhausted"] = True
+            break
+        for m in data:
+            cache["scanned"] += 1
+            names = _hf_repo_names(m)
+            if not names:
+                continue
+            cache["candidates"].append({
+                "id": m.get("id"),
+                "downloads": m.get("downloads") or 0,
+                "likes": m.get("likes") or 0,
+                "lastModified": m.get("lastModified"),
+                "names": names,
+            })
+        if len(data) < 100:
+            cache["exhausted"] = True
+    # Phase 2：量化预筛（文件名，免费）
+    cands = cache["candidates"]
+    if quant:
+        ql = quant.lower()
+        qpass = [c for c in cands if any(ql in n.lower() for n in c["names"])]
+    else:
+        qpass = cands
+    # Phase 3：按需并发拉尺寸，应用大小筛选，填充分页（分批 20，避免一次打太多请求）
+    matched = []
+    idx = skip
+    batch = 20
+    while len(matched) < limit and idx < len(qpass):
+        chunk = qpass[idx: idx + batch]
+        fmap = _hf_fetch_files_batch([c["id"] for c in chunk])
+        for c in chunk:
+            files = fmap.get(c["id"], [])
+            if _hf_repo_passes(files, min_gb, max_gb, quant):
+                matched.append({
+                    "id": c["id"],
+                    "downloads": c["downloads"],
+                    "likes": c["likes"],
+                    "lastModified": c["lastModified"],
+                    "gguf_files": files,
+                })
+                if len(matched) >= limit:
+                    break
+        idx += len(chunk)
+        if cache["exhausted"] and idx >= len(qpass):
+            break
+    has_more = (idx < len(qpass)) or (not cache["exhausted"])
+    return matched, has_more
 
 
 def hf_files(repo):
-    """取某仓库的 .gguf 文件清单 + 大小（一次 ?blobs=true 请求）。"""
+    """取某仓库的 .gguf 文件清单 + 大小（?blobs=true；full=true 不带 lfs.size，必须用这个）。带进程内缓存。"""
+    now = time.time()
+    c = _HF_FILES_CACHE.get(repo)
+    if c and now - c["ts"] < _HF_FILES_CACHE_TTL:
+        return c["files"]
     try:
         data = hf_http_json("%s/models/%s?blobs=true" % (HF_API, repo), timeout=25)
     except Exception:
-        return []
+        data = None
     out = []
-    for s in (data.get("siblings") or []):
-        fn = s.get("rfilename") or ""
-        if not fn.lower().endswith(".gguf"):
-            continue
-        size = (s.get("lfs") or {}).get("size") or 0
-        is_mmproj = ("mmproj" in fn.lower()) or ((s.get("lfs") or {}).get("is_mmproj") is True)
-        out.append({
-            "filename": fn,
-            "size_bytes": size,
-            "size_gb": round(size / 1024 ** 3, 2),
-            "is_mmproj": bool(is_mmproj),
-        })
+    if data:
+        for s in (data.get("siblings") or []):
+            fn = s.get("rfilename") or ""
+            if not fn.lower().endswith(".gguf"):
+                continue
+            lfs = s.get("lfs") or {}
+            size = lfs.get("size") or s.get("size") or 0
+            is_mmproj = ("mmproj" in fn.lower()) or (lfs.get("is_mmproj") is True)
+            out.append({
+                "filename": fn,
+                "size_bytes": size,
+                "size_gb": round(size / 1024 ** 3, 2) if size else 0,
+                "is_mmproj": bool(is_mmproj),
+            })
     # 真模型排前面（大→小），mmproj 垫后
     out.sort(key=lambda x: (x["is_mmproj"], -x["size_bytes"]))
+    _HF_FILES_CACHE[repo] = {"files": out, "ts": now}
     return out
 
 
@@ -3169,8 +3287,22 @@ class Handler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     skip = 0
                 sort = qs.get("sort", ["downloads"])[0]
+
+                def _gb(name):
+                    v = qs.get(name, [None])[0]
+                    if v in (None, ""):
+                        return None
+                    try:
+                        return float(v)
+                    except ValueError:
+                        return None
+
+                min_gb = _gb("min_gb")
+                max_gb = _gb("max_gb")
+                quant = qs.get("quant", [""])[0] or None
+                results, has_more = hf_search(q, limit, sort, skip, min_gb, max_gb, quant)
                 self.json(200, {"ok": True, "query": q,
-                                "results": hf_search(q, limit, sort, skip)})
+                                "results": results, "has_more": has_more})
             elif p == "/api/hf-files":
                 repo = parse_qs(u.query).get("repo", [""])[0]
                 if not repo:

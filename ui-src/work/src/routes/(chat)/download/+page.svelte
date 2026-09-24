@@ -67,17 +67,45 @@
 	let startError = $state<string | null>(null);
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 
-	/** 文件列表大小筛选（全局一套；<3GB = 8GB 卡的舒适区，3~6GB 看量化，>6GB 基本装不下） */
+	/** 「搜索前」大小筛选：以「仓库是否含某区间的量化」为口径（而非结果展开后筛文件）。
+	 *  <3GB = 8GB 卡的舒适区；3~6GB 看量化；>6GB 基本装不下。 */
 	const SIZE_FILTERS = [
-		{ value: 'all', label: 'All sizes' },
-		{ value: 'small', label: '< 3 GB' },
-		{ value: 'mid', label: '3-6 GB' },
-		{ value: 'large', label: '> 6 GB' }
+		{ value: 'all', label: 'All sizes', min: null, max: null },
+		{ value: 'small', label: '< 3 GB', min: null, max: 3 },
+		{ value: 'mid', label: '3-6 GB', min: 3, max: 6 },
+		{ value: 'large', label: '> 6 GB', min: 6, max: null }
 	] as const;
 	type SizeFilter = (typeof SIZE_FILTERS)[number]['value'];
 	let sizeFilter = $state<SizeFilter>('all');
+	/** 「搜索前」量化档筛选：只保留含该档量化的仓库（All quants = 不过滤）。 */
+	const QUANT_OPTIONS = [
+		{ value: 'all', label: 'All quants' },
+		{ value: 'Q4_K_M', label: 'Q4_K_M' },
+		{ value: 'Q4_K_S', label: 'Q4_K_S' },
+		{ value: 'Q5_K_M', label: 'Q5_K_M' },
+		{ value: 'Q6_K', label: 'Q6_K' },
+		{ value: 'Q8_0', label: 'Q8_0' },
+		{ value: 'IQ4_XS', label: 'IQ4_XS' },
+		{ value: 'IQ3_XXS', label: 'IQ3_XXS' },
+		{ value: 'F16', label: 'F16 / FP16' },
+		{ value: 'BF16', label: 'BF16' }
+	] as const;
+	type QuantFilter = (typeof QUANT_OPTIONS)[number]['value'];
+	let quantFilter = $state<QuantFilter>('all');
+	const quantLabel = $derived(
+		QUANT_OPTIONS.find((o) => o.value === quantFilter)?.label ?? 'All quants'
+	);
 	/** 文件按大小排序方向（默认大到小 —— 大文件通常就是想找的完整量化） */
 	let filesDesc = $state(true);
+
+	/** 把当前筛选项转成发给 manager 的数值参数（null = 不过滤）。 */
+	function sizeBounds(): { minGb: number | null; maxGb: number | null } {
+		const f = SIZE_FILTERS.find((x) => x.value === sizeFilter);
+		return { minGb: f?.min ?? null, maxGb: f?.max ?? null };
+	}
+	function quantParam(): string | null {
+		return quantFilter === 'all' ? null : quantFilter;
+	}
 
 	const activeJobList = $derived(Object.values(jobs));
 
@@ -100,6 +128,7 @@
 	}
 
 	onMount(() => {
+		restoreSearchState();
 		ManagerService.systemMetrics()
 			.then((m) => {
 				vramTotalGb = m.vram_total_gb ?? null;
@@ -128,12 +157,19 @@
 	async function doSearch(): Promise<void> {
 		searching = true;
 		searchError = null;
+		const { minGb, maxGb } = sizeBounds();
 
 		try {
-			const r = await ManagerService.hfSearch(query.trim(), PAGE_SIZE, sortBy, 0);
+			const r = await ManagerService.hfSearch(
+				query.trim(), PAGE_SIZE, sortBy, 0, minGb, maxGb, quantParam()
+			);
 
 			results = r.results;
-			moreAvailable = r.results.length >= PAGE_SIZE;
+			moreAvailable = Boolean(r.has_more);
+			const fb: Record<string, HfFileSummary[]> = {};
+			for (const x of r.results) fb[x.id] = x.gguf_files ?? [];
+			filesByRepo = fb;
+			saveSearchState();
 		} catch (e) {
 			searchError = e instanceof Error ? e.message : String(e);
 			results = [];
@@ -148,12 +184,19 @@
 		if (loadingMore) return;
 		loadingMore = true;
 		searchError = null;
+		const { minGb, maxGb } = sizeBounds();
 
 		try {
-			const r = await ManagerService.hfSearch(query.trim(), PAGE_SIZE, sortBy, results.length);
+			const r = await ManagerService.hfSearch(
+				query.trim(), PAGE_SIZE, sortBy, results.length, minGb, maxGb, quantParam()
+			);
 
 			results = [...results, ...r.results];
-			moreAvailable = r.results.length >= PAGE_SIZE;
+			moreAvailable = Boolean(r.has_more);
+			const fb = { ...filesByRepo };
+			for (const x of r.results) fb[x.id] = x.gguf_files ?? [];
+			filesByRepo = fb;
+			saveSearchState();
 		} catch (e) {
 			searchError = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -161,11 +204,54 @@
 		}
 	}
 
-	/** 已有结果时切排序 → 立刻按新排序重查；还没结果就只记住选择 */
+	/** 已有结果或已输入关键词时切排序 → 立刻按新排序重查；否则只记住选择 */
 	function onSortChange(v: string): void {
 		sortBy = v as SortKey;
 
 		if (results.length > 0 || query.trim()) void doSearch();
+	}
+
+	/** 改了大小/量化筛选 → 若已有结果或已输入关键词就随搜索重查；否则只记选择（下次搜索生效） */
+	function onFilterChange(): void {
+		if (results.length > 0 || query.trim()) void doSearch();
+	}
+
+	/** 把当前搜索状态（关键词/排序/筛选/结果）存进 sessionStorage，刷新或离开返回后免重查。 */
+	function saveSearchState(): void {
+		try {
+			localStorage.setItem(
+				'llama_desk.hf_download_state',
+				JSON.stringify({
+					query, sortBy, sizeFilter, quantFilter,
+					hasMore: moreAvailable, results, filesByRepo
+				})
+			);
+		} catch {
+			// 隐私模式 / 配额满 → 忽略，下次照常重查
+		}
+	}
+
+	/** 恢复上次离开时的搜索状态（只恢复展示，不自动发请求）。 */
+	function restoreSearchState(): void {
+		try {
+			const raw = localStorage.getItem('llama_desk.hf_download_state');
+			if (!raw) return;
+			const s = JSON.parse(raw) as {
+				query?: string; sortBy?: string; sizeFilter?: string; quantFilter?: string;
+				hasMore?: boolean; results?: HfRepoSummary[]; filesByRepo?: Record<string, HfFileSummary[]>;
+			};
+			if (typeof s.query === 'string') query = s.query;
+			if (s.sortBy) sortBy = s.sortBy as SortKey;
+			if (s.sizeFilter) sizeFilter = s.sizeFilter as SizeFilter;
+			if (s.quantFilter) quantFilter = s.quantFilter as QuantFilter;
+			if (Array.isArray(s.results)) {
+				results = s.results;
+				moreAvailable = Boolean(s.hasMore);
+			}
+			if (s.filesByRepo) filesByRepo = s.filesByRepo;
+		} catch {
+			// 解析失败 → 忽略，下次照常重查
+		}
 	}
 
 	async function toggleFiles(repo: string): Promise<void> {
@@ -176,7 +262,9 @@
 		}
 		expanded = repo;
 
-		if (!filesByRepo[repo]) {
+		// 搜索时已用 full=true 把每个仓库的文件清单一并带回（filesByRepo 已就绪），
+		// 这里只在兜底（清单缺失/为空）时才额外请求一次。
+		if (!filesByRepo[repo] || filesByRepo[repo].length === 0) {
 			loadingFiles = { ...loadingFiles, [repo]: true };
 
 			try {
@@ -294,17 +382,27 @@
 		}
 	}
 
-	/** 展开区文件列表：先按大小筛、再按大小排序 */
-	function visibleFiles(repo: string): HfFileSummary[] {
-		const list = (filesByRepo[repo] ?? []).filter((f) => {
-			if (sizeFilter === 'small') return f.size_gb < 3;
-			if (sizeFilter === 'mid') return f.size_gb >= 3 && f.size_gb <= 6;
-			if (sizeFilter === 'large') return f.size_gb > 6;
-
-			return true;
-		});
+	/** 展开区文件列表：仅按大小排序（大小/量化筛选已前置到搜索阶段）。 */
+	function sortedFiles(repo: string): HfFileSummary[] {
+		const list = filesByRepo[repo] ?? [];
 
 		return [...list].sort((a, b) => (filesDesc ? b.size_gb - a.size_gb : a.size_gb - b.size_gb));
+	}
+
+	/** 卡片上的「几个量化 · 大小区间 · 是否装得下」一行（数据来自搜索带回的 gguf_files）。 */
+	function repoSummary(r: HfRepoSummary): { n: number; minGb: number; maxGb: number; fits: boolean | null } {
+		const files = (r.gguf_files ?? []).filter((f) => !f.is_mmproj && f.size_gb > 0);
+		if (files.length === 0) return { n: 0, minGb: 0, maxGb: 0, fits: null };
+		const sizes = files.map((f) => f.size_gb);
+		const minGb = Math.min(...sizes);
+		const maxGb = Math.max(...sizes);
+		let fits: boolean | null = null;
+		if (vramTotalGb != null) {
+			// 最小的量化都能上卡 → 整仓库可上卡（预算取整卡 90%，与徽章口径一致）
+			fits = minGb <= vramTotalGb * 0.9;
+		}
+
+		return { n: files.length, minGb, maxGb, fits };
 	}
 
 	function fmtBytes(b: number): string {
@@ -369,6 +467,41 @@
 			{searching ? 'Searching…' : 'Search'}
 		</Button>
 	</div>
+
+	<!-- 搜索前筛选：大小区间 + 量化档，随搜索一起发给 manager，搜出来的仓库本身就符合条件 -->
+	<div class="mb-4 flex flex-wrap items-center gap-2">
+		<span class="text-xs text-muted-foreground">筛选</span>
+		{#each SIZE_FILTERS as sf (sf.value)}
+			<button
+				class="rounded-full border px-2.5 py-0.5 text-xs transition-colors {sizeFilter ===
+					sf.value
+					? 'border-primary bg-primary/10 text-primary'
+					: 'border-border text-muted-foreground hover:text-foreground'}"
+				onclick={() => {
+					sizeFilter = sf.value;
+					onFilterChange();
+				}}
+			>
+				{sf.label}
+			</button>
+		{/each}
+		<Select.Root
+			onValueChange={(v: string) => {
+				quantFilter = v as QuantFilter;
+				onFilterChange();
+			}}
+			type="single"
+			value={quantFilter}
+		>
+			<Select.Trigger class="w-fit text-xs" size="sm">{quantLabel}</Select.Trigger>
+			<Select.Content class="min-w-[10rem]">
+				{#each QUANT_OPTIONS as o (o.value)}
+					<Select.Item class="text-xs" label={o.label} value={o.value} />
+				{/each}
+			</Select.Content>
+		</Select.Root>
+	</div>
+
 	{#if searchError}
 		<p class="mb-4 text-sm text-red-500">{searchError}</p>
 	{:else if startError}
@@ -482,6 +615,18 @@
 									· <span>{r.lastModified.slice(0, 10)}</span>
 								{/if}
 							</span>
+							{#if (r.gguf_files ?? []).some((f) => !f.is_mmproj)}
+								<span class="shrink-0 text-xs text-muted-foreground">
+									<span>{repoSummary(r).n}</span><span class="ml-0.5">quants</span>
+									<span class="mx-1">·</span>
+									<span>{repoSummary(r).minGb.toFixed(1)}</span>–<span>{repoSummary(r).maxGb.toFixed(1)}</span><span class="ml-0.5">GB</span>
+									{#if repoSummary(r).fits === true}
+										<span class="ml-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-emerald-600">Fits</span>
+									{:else if repoSummary(r).fits === false}
+										<span class="ml-1 rounded-full bg-red-500/15 px-1.5 py-0.5 text-red-600">Won't fit</span>
+									{/if}
+								</span>
+							{/if}
 						</div>
 						{#if expanded === r.id}
 							<div class="border-t border-border bg-muted/30 px-4 py-3">
@@ -491,37 +636,24 @@
 										Loading files…
 									</p>
 								{:else}
-								<!-- 文件多于 1 个才显示筛选/排序条，单文件仓库没必要 -->
-								{#if (filesByRepo[r.id] ?? []).length > 1}
-									<div class="mb-2 flex items-center gap-1.5">
-										{#each SIZE_FILTERS as sf (sf.value)}
-											<button
-												class="rounded-full border px-2 py-0.5 text-xs transition-colors {sizeFilter ===
-												sf.value
-													? 'border-primary bg-primary/10 text-primary'
-													: 'border-border text-muted-foreground hover:text-foreground'}"
-												onclick={() => (sizeFilter = sf.value)}
-											>
-												{sf.label}
-											</button>
-										{/each}
-										<button
-											class="ml-auto rounded-md border border-border p-1 text-muted-foreground hover:text-foreground"
-											onclick={() => (filesDesc = !filesDesc)}
-										>
-											{#if filesDesc}
-												<ArrowDownWideNarrow class="h-3.5 w-3.5" />
-											{:else}
-												<ArrowUpNarrowWide class="h-3.5 w-3.5" />
-											{/if}
-										</button>
-									</div>
-								{/if}
-								{#if visibleFiles(r.id).length === 0}
-									<p class="py-2 text-sm text-muted-foreground">No files match this size filter.</p>
+								<div class="mb-2 flex items-center justify-end gap-1.5">
+									<button
+										class="rounded-md border border-border p-1 text-muted-foreground hover:text-foreground"
+										onclick={() => (filesDesc = !filesDesc)}
+										aria-label="toggle size sort"
+									>
+										{#if filesDesc}
+											<ArrowDownWideNarrow class="h-3.5 w-3.5" />
+										{:else}
+											<ArrowUpNarrowWide class="h-3.5 w-3.5" />
+										{/if}
+									</button>
+								</div>
+								{#if sortedFiles(r.id).length === 0}
+									<p class="py-2 text-sm text-muted-foreground">This repository has no downloadable GGUF files.</p>
 								{:else}
 									<ul class="flex flex-col gap-2">
-										{#each visibleFiles(r.id) as f (f.filename)}
+										{#each sortedFiles(r.id) as f (f.filename)}
 											<li
 												class="flex items-center gap-3 rounded-md border border-border bg-card px-3 py-2"
 											>

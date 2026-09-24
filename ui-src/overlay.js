@@ -1058,6 +1058,10 @@
     'Delete record': '删除记录',
     'No files match this size filter.': '没有符合该大小筛选的文件。',
     'Load more': '加载更多',
+    // 搜索前筛选（大小 chips + 量化档下拉，第 2 轮增强后移到搜索前）
+    'All quants': '全部量化',
+    'quants': '个量化',
+    'This repository has no downloadable GGUF files.': '该仓库没有可下载的 GGUF 文件。',
     'KV estimated from layer counts - hybrid-attention models can be overstated several times.': 'KV 按层数结构估算 —— 混合注意力模型（如 Qwen3.5）可能被高估好几倍。',
     'Measuring this model on your GPU…': '正在本卡上实测这个模型…',
     'Models on disk': '磁盘上的模型',

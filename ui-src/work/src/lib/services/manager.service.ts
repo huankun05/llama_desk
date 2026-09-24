@@ -344,6 +344,8 @@ export interface HfRepoSummary {
 	downloads: number;
 	likes: number;
 	lastModified?: string | null;
+	/** 该仓库的 .gguf 文件清单（搜索时由 manager 用 full=true 一并带回，免去二次请求） */
+	gguf_files?: HfFileSummary[];
 }
 
 export interface HfFileSummary {
@@ -357,6 +359,8 @@ export interface HfSearchResponse {
 	ok: boolean;
 	query: string;
 	results: HfRepoSummary[];
+	/** 是否还有更多匹配（筛选后翻页用，manager 进程内缓存决定） */
+	has_more?: boolean;
 }
 
 export interface HfFilesResponse {
@@ -479,16 +483,22 @@ export class ManagerService {
 		q: string,
 		limit = 30,
 		sort: 'downloads' | 'likes' | 'lastModified' = 'downloads',
-		skip = 0
+		skip = 0,
+		minGb: number | null = null,
+		maxGb: number | null = null,
+		quant: string | null = null
 	): Promise<HfSearchResponse> {
 		const qs = new URLSearchParams({
 			q,
 			limit: String(limit),
 			sort,
 			skip: String(skip)
-		}).toString();
+		});
+		if (minGb != null) qs.set('min_gb', String(minGb));
+		if (maxGb != null) qs.set('max_gb', String(maxGb));
+		if (quant) qs.set('quant', quant);
 
-		return managerFetch<HfSearchResponse>(`/api/hf-search?${qs}`);
+		return managerFetch<HfSearchResponse>(`/api/hf-search?${qs.toString()}`);
 	}
 
 	/** 取某仓库的 .gguf 文件清单 + 大小（一次请求）。 */
