@@ -1,0 +1,17 @@
+feat(download): 下载器第 2 轮增强——大小筛选/排序 + 任务操作 + 磁盘检查 + HF 镜像支持
+
+前端（#/download，overlay.js?v=84）：
+- 文件列表大小筛选 chips（全部 / <3GB / 3-6GB / >6GB，全局一套状态）
+- 排序方向按钮（默认大到小，点击反转）
+- 任务卡新增「打开文件夹」（复用 /api/open-path）与「删除记录」（仅终态）
+
+后端（manager.py）：
+- 磁盘余量检查：下载前 shutil.disk_usage，不足 total+2GB → 400 报明确数字
+- 新端点 POST /api/hf-download/<id>/remove（终态才可删，进行中回 409）
+- HF_API_BASE 环境变量切镜像（hf-mirror.com 等完整反代，API/resolve 同构）
+- _hf_ssl_ctx()：SSL 证书链异常时代理/沙箱环境降级不校验（有大小校验兜底）
+
+验证：
+- probe_download_page.mjs 扩到 21 项断言全过（含 '>6GB' 空态、GB 序列
+  降/升序、删除记录卡片消失、磁盘 400 直测）
+- 回归 35 + 12 + 16 = 63/63；svelte-check 0/0；DICT 0 撞键、CJK 0 处
