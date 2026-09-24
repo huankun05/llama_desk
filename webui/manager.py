@@ -2312,6 +2312,185 @@ def _gpu_refresher():
             pass
         time.sleep(GPU_WARM_INTERVAL)
 
+# ---------- GPU 健康时序（F：归因面板数据源） ----------
+# 背景（backend-perf.md）：「这次怎么变慢了」以前只能靠用户手动抓 nvidia-smi。
+# 判据铁律：**只在慢的那一刻同时看四个数** —— draw / enforced limit / 降频标志 / tg。
+#   draw 远低于上限且降频标志全空 ⇒ 卡在「等」（CPU/内存/IO），不是显卡墙；
+#   撞 sw power / thermal 标志 ⇒ 功耗/温度墙已降频；util 高且无异常 ⇒ 正常满负荷。
+# 常驻采样线程每 2s 抓一行 nvidia-smi 单行 CSV（~50-100ms），环形缓冲保留 1 小时。
+# ⚠️ power.limit 字段在本机（WDDM 笔记本）返回 [N/A] → enforced limit 用
+#   `nvidia-smi -q -d POWER` 慢查（60s 缓存），失败回退默认 115W。
+_GPU_HIST = []                      # [{ts, draw, util, temp, sm, reasons}, ...] 时间升序
+_GPU_HIST_LOCK = threading.Lock()
+_GPU_HIST_MAX = 1800                # 2s × 1800 = 1 小时
+_GPU_SAMPLER_INTERVAL = 2.0
+_GPU_LIMIT = {"w": None, "ts": 0.0} # enforced power limit（60s 缓存）
+_GPU_LIMIT_DEFAULT = 115.0          # 本机 Default Power Limit（-q 查不到时的兜底）
+_GPU_REASON_FIELD = "clocks_throttle_reasons.active"   # 启动时自动探测新驱动名
+
+def _gpu_enforced_limit():
+    """enforced power limit（W）。60s 缓存；查不到保留旧值/None（判据函数兜底）。"""
+    now = time.time()
+    if _GPU_LIMIT["w"] is None or now - _GPU_LIMIT["ts"] > 60:
+        out = _run(["nvidia-smi", "-q", "-d", "POWER"], timeout=6.0)
+        # ⚠️ 字段名随驱动代际不同：新驱动本机叫 "Current Power Limit"（会随用户设置变），
+        #   老叫法 "Enforced Power Limit"。两个都认。
+        m = re.search(r"(?:Enforced|Current) Power Limit\s*:\s*([\d.]+)", out or "")
+        if m:
+            _GPU_LIMIT["w"] = float(m.group(1))
+            _GPU_LIMIT["ts"] = now
+    return _GPU_LIMIT["w"]
+
+def _gpu_sampler():
+    """每 2s 采一行：power.draw / utilization / 温度 / SM 时钟 / 降频标志位掩码。"""
+    global _GPU_REASON_FIELD
+    # 新驱动（≥555）叫 clocks_event_reasons.active，旧名 clocks_throttle_reasons.active：
+    # 字段不存在时 nvidia-smi 会报 "not a valid field"，据此自动探测。
+    for f in ("clocks_event_reasons.active", "clocks_throttle_reasons.active"):
+        _rc, out2 = _run_capture(
+            ["nvidia-smi", "--query-gpu=power.draw,utilization.gpu,temperature.gpu,clocks.sm," + f,
+             "--format=csv,noheader,nounits"], timeout=6.0)
+        if _rc == 0 and out2 and "not a valid field" not in out2:
+            _GPU_REASON_FIELD = f
+            break
+    q = ("--query-gpu=power.draw,utilization.gpu,temperature.gpu,clocks.sm,"
+         + _GPU_REASON_FIELD)
+    while True:
+        try:
+            out = _run(["nvidia-smi", q, "--format=csv,noheader,nounits"], timeout=6.0)
+            lines = (out or "").strip().splitlines()
+            if lines:
+                parts = [x.strip() for x in lines[0].split(",")]
+
+                def _num(s, cast=float):
+                    s = s.replace("[", "").replace("]", "")
+                    try:
+                        return cast(float(s))
+                    except ValueError:
+                        return None
+
+                draw = _num(parts[0]) if len(parts) > 0 else None
+                util = _num(parts[1], int) if len(parts) > 1 else None
+                temp = _num(parts[2], int) if len(parts) > 2 else None
+                sm = _num(parts[3], int) if len(parts) > 3 else None
+                reasons = 0
+                if len(parts) > 4:
+                    try:
+                        reasons = int(parts[4], 16)
+                    except ValueError:
+                        reasons = 0
+                with _GPU_HIST_LOCK:
+                    _GPU_HIST.append({"ts": time.time(), "draw": draw, "util": util,
+                                      "temp": temp, "sm": sm, "reasons": reasons})
+                    if len(_GPU_HIST) > _GPU_HIST_MAX:
+                        del _GPU_HIST[: len(_GPU_HIST) - _GPU_HIST_MAX]
+        except Exception:
+            pass
+        try:
+            _gpu_enforced_limit()      # 60s 慢查摊平到采样循环里，失败不阻塞
+        except Exception:
+            pass
+        time.sleep(_GPU_SAMPLER_INTERVAL)
+
+# 降频标志位（nvidia-smi clocks_*_reasons.active 位掩码）
+_GPU_R_IDLE = 0x1            # GPU Idle（空载，正常）
+_GPU_R_SWPOWER = 0x4         # SW Power Cap（功耗墙，软）
+_GPU_R_HWSLOW = 0x8          # HW Slowdown（硬件降速）
+_GPU_R_SYNCBOOST = 0x10      # Sync Boost（正常现象）
+_GPU_R_SWTHERMAL = 0x20      # SW Thermal Slowdown（软件温度墙）
+_GPU_R_HWTHERMAL = 0x40      # HW Thermal Slowdown
+_GPU_R_HWPOWER = 0x80        # HW Power Brakedown
+
+def _gpu_verdict(pts, limit_w):
+    """把一段采样翻译成人话。判据 = backend-perf.md「四个数同时看」。
+    ⚠️ 「功耗低」是结果不是原因：低功耗 + 低占用 + 无降频标志 ⇒ 是「在等」，
+    不是「省电」——瓶颈在 CPU/内存/IO，不在显卡。"""
+    if not pts:
+        return {"level": "unknown", "msg": "No samples yet - waiting for the sampler.",
+                "avg_draw": None, "avg_util": None, "max_temp": None, "limit_w": limit_w}
+    draws = [p["draw"] for p in pts if p.get("draw") is not None]
+    utils = [p["util"] for p in pts if p.get("util") is not None]
+    temps = [p["temp"] for p in pts if p.get("temp") is not None]
+    avg_draw = sum(draws) / len(draws) if draws else None
+    avg_util = sum(utils) / len(utils) if utils else None
+    max_temp = max(temps) if temps else None
+    reasons_any = 0
+    for p in pts:
+        reasons_any |= p.get("reasons") or 0
+    cap = limit_w or _GPU_LIMIT_DEFAULT
+
+    hard = reasons_any & (_GPU_R_HWTHERMAL | _GPU_R_HWPOWER | _GPU_R_HWSLOW)
+    soft = reasons_any & (_GPU_R_SWPOWER | _GPU_R_SWTHERMAL)
+    # 空载（只有 IDLE 标志、几乎不占不耗）必须单独给结论：
+    # 否则会落进「在等」分支，用户没跑模型也看到「瓶颈在 CPU/RAM」的误导归因。
+    if (reasons_any & ~_GPU_R_IDLE) == 0 and avg_util is not None and avg_util < 10 \
+            and (avg_draw is None or avg_draw < cap * 0.25):
+        return {"level": "idle",
+                "msg": "GPU is idle - load a model and generate something to get a verdict.",
+                "avg_draw": avg_draw, "avg_util": avg_util, "max_temp": max_temp, "limit_w": limit_w}
+    if hard:
+        return {"level": "red",
+                "msg": "Hardware slowdown is active (thermal/power) - the GPU is being throttled.",
+                "avg_draw": avg_draw, "avg_util": avg_util, "max_temp": max_temp, "limit_w": limit_w}
+    if soft and avg_util is not None and avg_util >= 60:
+        return {"level": "yellow",
+                "msg": "Power/thermal cap is active while the GPU is busy - speed is being throttled.",
+                "avg_draw": avg_draw, "avg_util": avg_util, "max_temp": max_temp, "limit_w": limit_w}
+    if avg_util is not None and avg_util >= 70:
+        return {"level": "green",
+                "msg": "GPU is at full load - compute-bound, as expected.",
+                "avg_draw": avg_draw, "avg_util": avg_util, "max_temp": max_temp, "limit_w": limit_w}
+    if (avg_util is not None and avg_util < 40 and avg_draw is not None
+            and avg_draw < cap * 0.5 and not (reasons_any & ~_GPU_R_IDLE)):
+        return {"level": "yellow",
+                "msg": "GPU is mostly waiting (low power draw, no throttle flags) - the bottleneck is CPU / RAM / I/O, not the graphics card.",
+                "avg_draw": avg_draw, "avg_util": avg_util, "max_temp": max_temp, "limit_w": limit_w}
+    return {"level": "green", "msg": "Load is moderate, no throttling flags.",
+            "avg_draw": avg_draw, "avg_util": avg_util, "max_temp": max_temp, "limit_w": limit_w}
+
+# ---------- 轻量档基准（E）：解析实例日志的 print_timing，零新子进程 ----------
+# llama.cpp 本来就在生成中每 3s / 结束时打印：
+#   n_gen =  274, tg =  28.82 t/s, tg_3s =  30.78 t/s        ← b10853 的实时行
+#   eval time = 12551.77 ms / 364 tokens (…, 28.92 tokens per second)
+# 「慢」的铁证就在现成日志里，不需要再跑任何基准负载去打扰用户。
+def bench_light():
+    try:
+        logs = [os.path.join(WEBUI_DIR, n) for n in os.listdir(WEBUI_DIR)
+                if n.startswith("inst_") and n.endswith(".log")]
+    except OSError:
+        logs = []
+    if not logs:
+        return {"ok": False, "error": "no instance log (inst_*.log) found"}
+    log_path = max(logs, key=os.path.getmtime)
+    try:
+        size = os.path.getsize(log_path)
+        with open(log_path, "rb") as f:
+            f.seek(max(0, size - 262144))          # 尾部 256KB 覆盖最近多次生成
+            text = _decode_bytes(f.read())
+        mtime = os.path.getmtime(log_path)
+    except OSError as e:
+        return {"ok": False, "error": "read failed: %s" % e}
+    n_gen = tg = tg3 = eval_tps = eval_n = None
+    for line in reversed(text.splitlines()):
+        if "print_timing" not in line:
+            continue
+        if tg is None:
+            m = re.search(r"n_gen\s*=\s*(\d+),\s*tg\s*=\s*([\d.]+)\s*t/s,\s*tg_3s\s*=\s*([\d.]+)",
+                          line)
+            if m:
+                n_gen, tg, tg3 = int(m.group(1)), float(m.group(2)), float(m.group(3))
+        if eval_tps is None:
+            m = re.search(r"eval time\s*=\s*[\d.]+\s*ms\s*/\s*(\d+)\s*tokens"
+                          r".*?,\s*([\d.]+)\s*tokens per second", line)
+            if m:
+                eval_n, eval_tps = int(m.group(1)), float(m.group(2))
+        if tg is not None and eval_tps is not None:
+            break
+    return {"ok": True, "log": os.path.basename(log_path),
+            "n_gen": n_gen, "tg": tg, "tg_3s": tg3,
+            "eval_tokens": eval_n, "eval_tps": eval_tps,
+            "age_s": round(max(0.0, time.time() - mtime), 1)}
+
 # ---------- 在资源管理器里打开路径 ----------
 # 白名单：只允许打开 llama.cpp 自己的目录（模型目录 / webui / 项目根）。
 # 这个端点有「执行本机动作」的语义，绝不能变成任意路径的浏览器。
@@ -3131,6 +3310,35 @@ class Handler(BaseHTTPRequestHandler):
             elif p == "/api/system-metrics":
                 # 系统资源（CPU/RAM/GPU/VRAM），1s 缓存
                 self.json(200, get_system_metrics())
+            elif p == "/api/gpu-history":
+                # F：GPU 健康时序 + 人话归因。?seconds=60（10~3600）。
+                # ⚠️ 这段分发链在 `qs` 变量定义之前（qs 只在 hf-* 那组才建）→ 用 parse_qs 内联。
+                try:
+                    seconds = int(float(parse_qs(u.query).get("seconds", ["60"])[0] or 60))
+                except (TypeError, ValueError):
+                    seconds = 60
+                seconds = max(10, min(3600, seconds))
+                now = time.time()
+                with _GPU_HIST_LOCK:
+                    pts = [dict(x) for x in _GPU_HIST if x["ts"] >= now - seconds]
+                verdict = _gpu_verdict(pts, _GPU_LIMIT["w"])
+                # 语义修正：WDDM 桌面合成会让空载 GPU 也冒出 30~50% 利用率，
+                # 「在等」归因只在**真的在生成**时才有意义 —— 最近 120s 没有任何
+                # print_timing 就降级成「空载」（复用同一条 idle 文案，避免新词条）。
+                if verdict["level"] == "yellow" and "waiting" in verdict.get("msg", ""):
+                    try:
+                        _b = bench_light()
+                        if _b.get("ok") and (_b.get("age_s") or 0) > 120:
+                            verdict = dict(verdict, level="idle", msg=(
+                                "GPU is idle - load a model and generate something to get a verdict."))
+                    except Exception:
+                        pass
+                self.json(200, {"ok": True, "seconds": seconds, "points": pts,
+                                "verdict": verdict,
+                                "limit_w": _GPU_LIMIT["w"]})
+            elif p == "/api/bench-light":
+                # E：轻量档基准 —— 实例日志里现成的 print_timing，零干扰。
+                self.json(200, bench_light())
             elif p == "/api/gpu-cleanup" and data is None:
                 # 只盘点：显存被谁占着、哪些 llama-server 没人管。**只读，不杀任何进程。**
                 self.json(200, cleanup_report())
@@ -3528,6 +3736,7 @@ if __name__ == "__main__":
     # 这两个以前漏了（_sys_refresher 甚至从来没被 start 过）—— 见各自 docstring
     threading.Thread(target=_sys_refresher, daemon=True).start()
     threading.Thread(target=_gpu_refresher, daemon=True).start()
+    threading.Thread(target=_gpu_sampler, daemon=True).start()   # F：GPU 健康时序（2s 一行）
     # 后台给「上次使用的模型」补一次实测 KV（B-L2）。只在没有实例运行时干活，
     # 所以它既不拖慢加载、也不跟正在跑的模型抢显存。
     threading.Thread(target=_fit_prewarm_loop, daemon=True).start()

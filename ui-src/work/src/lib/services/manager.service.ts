@@ -308,6 +308,46 @@ export interface ManagerGpuProcess {
 	instance_id: string | null;
 }
 
+/** F：`GET /api/gpu-history` 采样点（manager 后台 2s 一行 nvidia-smi） */
+export interface ManagerGpuSample {
+	ts: number;
+	draw: number | null; // 功耗 W
+	util: number | null; // GPU 利用率 %
+	temp: number | null; // 温度 °C
+	sm: number | null; // SM 时钟 MHz
+	reasons: number; // 降频标志位掩码（0x1 idle / 0x4 sw power / 0x20 sw thermal …）
+}
+
+export interface ManagerGpuVerdict {
+	level: 'green' | 'yellow' | 'red' | 'idle' | 'unknown';
+	msg: string; // 人话归因（英文源码，overlay 负责 translate）
+	avg_draw: number | null;
+	avg_util: number | null;
+	max_temp?: number | null;
+	limit_w?: number | null;
+}
+
+export interface ManagerGpuHistory {
+	ok: boolean;
+	seconds: number;
+	points: ManagerGpuSample[];
+	verdict: ManagerGpuVerdict;
+	limit_w: number | null;
+}
+
+/** E：`GET /api/bench-light` —— 实例日志里现成的生成速度（tg / tg_3s 来自 llama.cpp 自身打印） */
+export interface ManagerBenchLight {
+	ok: boolean;
+	log?: string;
+	n_gen?: number | null;
+	tg?: number | null; // 整段生成平均 t/s
+	tg_3s?: number | null; // 最近 3 秒窗口 t/s（更贴近「现在」）
+	eval_tokens?: number | null;
+	eval_tps?: number | null;
+	age_s?: number; // 日志最后写入距今秒数
+	error?: string;
+}
+
 /** `GET /api/gpu-cleanup` 的盘点结果（只读） */
 export interface ManagerGpuCleanupReport {
 	gpu: { used_mib: number | null; total_mib: number | null };
@@ -454,6 +494,16 @@ export class ManagerService {
 	/** 显存/进程盘点（**只读**）：谁在占显存、哪些 llama-server 没人管 */
 	static gpuCleanupStatus(): Promise<ManagerGpuCleanupReport> {
 		return managerFetch<ManagerGpuCleanupReport>('/api/gpu-cleanup');
+	}
+
+	/** E：轻量档基准 —— 解析实例日志现成的 print_timing，零新子进程、零干扰。 */
+	static benchLight(): Promise<ManagerBenchLight> {
+		return managerFetch<ManagerBenchLight>('/api/bench-light');
+	}
+
+	/** F：GPU 健康时序 + 人话归因（manager 后台 2s 采样，环形缓冲 1 小时）。 */
+	static gpuHistory(seconds = 60): Promise<ManagerGpuHistory> {
+		return managerFetch<ManagerGpuHistory>(`/api/gpu-history?seconds=${seconds}`);
 	}
 
 	/**

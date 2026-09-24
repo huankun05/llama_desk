@@ -809,11 +809,45 @@
 		}
 	}
 
+	// ===== F：GPU 健康时序 + E：实测速度（实例日志里现成的 print_timing）=====
+	// 判据 = backend-perf.md：draw / enforced limit / 降频标志 / tg 四个数**同时看**，
+	// 「功耗低」是结果不是原因 —— 低功耗 + 无降频标志 = GPU 在等，瓶颈在别处。
+	let gpuHist = $state<import('$lib/services').ManagerGpuHistory | null>(null);
+	let bench = $state<import('$lib/services').ManagerBenchLight | null>(null);
+	const GPUH_WINDOW = 60; // 时序窗口（秒）
+
+	async function refreshGpuHealth() {
+		try {
+			gpuHist = await ManagerService.gpuHistory(GPUH_WINDOW);
+		} catch {
+			gpuHist = null; // manager 不在线（如零模型哨兵被关）就保持占位
+		}
+		try {
+			bench = await ManagerService.benchLight();
+		} catch {
+			bench = null;
+		}
+	}
+
 	/** manager 侧轮询同理：页面在后台就不发请求（见上面 tickSys 的说明）。 */
 	function tickMgr() {
 		if (document.hidden) return;
 		void loadMgr();
 	}
+	onMount(() => {
+		void refreshGpuHealth();
+		const gpuTimer = setInterval(() => {
+			if (!document.hidden) void refreshGpuHealth();
+		}, 5000);
+		const onVisGpu = () => {
+			if (!document.hidden) void refreshGpuHealth();
+		};
+		document.addEventListener('visibilitychange', onVisGpu);
+		return () => {
+			clearInterval(gpuTimer);
+			document.removeEventListener('visibilitychange', onVisGpu);
+		};
+	});
 	onMount(() => {
 		loadMgr();
 		mgrTimer = setInterval(tickMgr, 5000);
@@ -1699,6 +1733,156 @@
 				{/if}
 			</div>
 		{/if}
+	</CollapsibleSection>
+
+	<!-- ===== GPU 健康：慢的归因不再靠猜（backend-perf 判据四个数同看） ===== -->
+	<CollapsibleSection
+		id="gpuhealth"
+		icon={Activity}
+		storageKey={LS_SECTIONS}
+		title="GPU Health"
+	>
+		<div class="rounded-lg border border-border bg-card p-4 shadow-sm">
+			{#if !gpuHist}
+				<p class="text-sm text-muted-foreground">
+					Manager offline or sampling not available.
+				</p>
+			{:else}
+				<!-- 结论徽章 + 人话归因（msg 是 manager 的固定句子，整文本节点由 overlay 翻译） -->
+				<div class="flex flex-wrap items-center gap-2">
+					{#if gpuHist.verdict.level === 'green'}
+						<span class="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-600"
+							>Healthy</span
+						>
+					{:else if gpuHist.verdict.level === 'yellow'}
+						<span class="rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-600"
+							>Attention</span
+						>
+					{:else if gpuHist.verdict.level === 'red'}
+						<span class="rounded-full bg-red-500/15 px-2 py-0.5 text-xs text-red-600"
+							>Throttled</span
+						>
+					{:else}
+						<span class="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+							>Idle</span
+						>
+					{/if}
+					<span class="text-xs text-muted-foreground">{gpuHist.verdict.msg}</span>
+				</div>
+
+				<!--
+					60s 时序：功耗（实线，按 enforced limit 或 115W 归一）+ 利用率（虚线，0-100%）。
+					手绘 polyline，零图表依赖。两个尺度画在同一块里，图例分色。
+				-->
+				{@const pts = gpuHist.points}
+				{@const maxDraw = Math.max(gpuHist.limit_w ?? 115, ...(pts.map((p) => p.draw ?? 0)), 1)}
+				{#if pts.length >= 2}
+					<svg
+						viewBox="0 0 600 120"
+						preserveAspectRatio="none"
+						class="mt-3 h-24 w-full overflow-visible rounded-md bg-muted/40"
+						role="img"
+					>
+						<polyline
+							fill="none"
+							stroke="var(--chart-4, #888)"
+							stroke-width="2"
+							points={pts
+								.map((p, i) => {
+									const x = (i / (pts.length - 1)) * 600;
+									const y = 120 - ((p.draw ?? 0) / maxDraw) * 110 - 5;
+									return `${x.toFixed(1)},${y.toFixed(1)}`;
+								})
+								.join(' ')}
+						></polyline>
+						<polyline
+							fill="none"
+							stroke="var(--chart-1, #35a)"
+							stroke-width="2"
+							stroke-dasharray="5 4"
+							points={pts
+								.map((p, i) => {
+									const x = (i / (pts.length - 1)) * 600;
+									const y = 120 - ((p.util ?? 0) / 100) * 110 - 5;
+									return `${x.toFixed(1)},${y.toFixed(1)}`;
+								})
+								.join(' ')}
+						></polyline>
+					</svg>
+					<div
+						class="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground"
+					>
+						<span class="inline-flex items-center gap-1">
+							<span
+								class="h-0.5 w-4"
+								style="background: var(--chart-4, #888); display: inline-block"
+							></span>
+							<span>Power draw</span>
+							<span class="font-mono">
+								{gpuHist.verdict.avg_draw != null ? gpuHist.verdict.avg_draw.toFixed(0) : '—'}
+							</span>
+							<span>/</span>
+							<span class="font-mono">{gpuHist.limit_w ?? 115}</span>
+							<span>W</span>
+						</span>
+						<span class="inline-flex items-center gap-1">
+							<span
+								class="h-0.5 w-4 border-t-2 border-dashed"
+								style="border-color: var(--chart-1, #35a)"
+							></span>
+							<span>Utilization</span>
+							<span class="font-mono">
+								{gpuHist.verdict.avg_util != null ? gpuHist.verdict.avg_util.toFixed(0) : '—'}
+							</span>
+							<span>%</span>
+						</span>
+						{#if gpuHist.verdict.max_temp != null}
+							<span class="inline-flex items-center gap-1">
+								<span>Temp</span>
+								<span class="font-mono">{gpuHist.verdict.max_temp}</span>
+								<span>°C</span>
+							</span>
+						{/if}
+						<span class="ml-auto">{GPUH_WINDOW}</span>
+						<span>s window</span>
+					</div>
+				{:else}
+					<p class="mt-2 text-xs text-muted-foreground">
+						Collecting samples - wait a few seconds.
+					</p>
+				{/if}
+
+				<!-- E：实测速度。数字与单位分属不同文本节点，overlay 才能整节点命中翻译 -->
+				{#if bench?.ok && bench.tg != null}
+					<div class="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/60 pt-2.5 text-xs">
+						<span class="text-muted-foreground">Last generation</span>
+						<span class="font-mono text-sm font-semibold text-foreground">
+							{bench.tg.toFixed(1)}
+						</span>
+						<span class="text-muted-foreground">tok/s</span>
+						{#if bench.tg_3s != null}
+							<span class="text-muted-foreground">·</span>
+							<span class="text-muted-foreground">last 3s</span>
+							<span class="font-mono text-sm">{bench.tg_3s.toFixed(1)}</span>
+							<span class="text-muted-foreground">tok/s</span>
+						{/if}
+						{#if bench.eval_tokens != null && bench.eval_tokens > 0}
+							<span class="text-muted-foreground">·</span>
+							<span class="font-mono">{bench.eval_tokens}</span>
+							<span class="text-muted-foreground">tokens</span>
+						{/if}
+						{#if bench.age_s != null}
+							<span class="ml-auto text-muted-foreground">
+								{bench.age_s < 90
+									? `${Math.round(bench.age_s)}`
+									: `${Math.round(bench.age_s / 60)}`}
+							</span>
+							<span class="text-muted-foreground">{bench.age_s < 90 ? 's ago' : 'min ago'}</span>
+						{/if}
+					</div>
+				{/if}
+			{/if}
+		</div>
 	</CollapsibleSection>
 
 	<!-- ===== 显存清理：管理器管不到的 llama-server 也在这里收掉 ===== -->

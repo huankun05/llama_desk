@@ -890,6 +890,28 @@ webui/manager_pkg/
 >   **8/8**；全量回归 `probe_download_page.mjs` **28/28**；CJK 审计 0 处；
 >   出图 `diag/shots-20260924-size-unknown/`。
 
+> **第 3 批收尾：F「GPU 健康/归因面板」+ E「轻量档基准」完成（9-24，`overlay.js?v=91`+）**：
+> - **F 后端（manager.py）**：常驻 `_gpu_sampler` 线程每 2s 抓一行 nvidia-smi 单行 CSV
+>   （power.draw / util / 温度 / SM 时钟 / 降频标志掩码），环形缓冲 1800 点 = 1 小时。
+>   ⚠️ 本机 `power.limit` 字段返回 `[N/A]`（WDDM）→ enforced limit 用 `nvidia-smi -q -d POWER`
+>   慢查（60s 缓存）；⚠️ 字段名随驱动代际不同（新 `clocks_event_reasons.active` /
+>   旧 `clocks_throttle_reasons.active`）→ 启动时自动探测。`GET /api/gpu-history?seconds=60`
+>   返回时序 + `_gpu_verdict` 人话归因（green/yellow/red/idle/unknown）。
+> - **归因判据**（= backend-perf.md 铁律，四数同看）：硬降速标志 → 红「被强制降频」；
+>   软功耗/温度墙 + util≥60 → 黄「撞墙压制」；util≥70 → 绿「满负荷计算」；
+>   低功耗 + 低占用 + 无降频 → 黄「GPU 在等，瓶颈在 CPU/内存/IO」（⚠️「功耗低」是结果不是原因）；
+>   仅 IDLE 标志 → 灰「空载」。**语义修正**：WDDM 桌面合成会让空载 GPU 冒出 30~50% util，
+>   最近 120s 无 print_timing 时「在等」自动降级为「空载」（复用同一条 idle 文案）。
+> - **E 后端**：`GET /api/bench-light` 解析 `webui/inst_*.log` 尾部 256KB 的现成
+>   `print_timing` 行（b10853 自带 `n_gen / tg / tg_3s` 实时行 + eval 行），**零新子进程、零干扰**。
+>   离线 + 在线实测均一次命中旧日志里的 28.92 t/s（正是 9:36 未定位慢的现场数据）。
+> - **前端（性能页新分节「GPU 健康」）**：结论徽章（绿/黄/红/灰）+ 归因人话（7 条固定句全进 DICT）+
+>   手绘 SVG 双线时序（功耗实线 / 利用率虚线，60s 窗口）+ 「上次生成 tok/s」行
+>   （tg / tg_3s / tokens / N 秒前），5s 轮询、页面隐藏即停。
+> - **验收**：新探针 `tools/ui/probe_gpu_health.mjs`（真后端真数据，不 mock）**9/9**；
+>   回归 35+12+16=**63/63** + `probe_size_unknown` 8/8；CJK 0 处、dict_dedupe 0 撞键。
+>   ⚠️ **manager.py 改动需重启才生效**（用户侧双击 `webui\restart-manager.bat`）。
+
 ### 第 3 批（2 天 · 可观测性）
 9. **F GPU 健康 / 归因面板**
 10. **E 一键基准 + 留档**（轻量档先上，严格档后补）
