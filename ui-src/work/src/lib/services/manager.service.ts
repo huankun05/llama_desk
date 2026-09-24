@@ -344,8 +344,9 @@ export interface HfRepoSummary {
 	downloads: number;
 	likes: number;
 	lastModified?: string | null;
-	/** 该仓库的 .gguf 文件清单（搜索时由 manager 用 full=true 一并带回，免去二次请求） */
-	gguf_files?: HfFileSummary[];
+	/** 该仓库的 .gguf 文件清单（搜索时由 manager 用 full=true 一并带回，免去二次请求）。
+	    null = 拉取失败/未知（网络抖动或 gated），前端须显示「size unknown」而非误判。 */
+	gguf_files?: HfFileSummary[] | null;
 }
 
 export interface HfFileSummary {

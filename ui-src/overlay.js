@@ -558,6 +558,8 @@
     'Set working directory to': '将工作目录设置为',
     'Set working directory to ...': '将工作目录设置为…',
     'Set working directory to&nbsp;': '设置工作目录为',
+    'Filter': '筛选',
+    'size unknown': '大小未知',
     'Settings': '设置',
     'Settings saved': '设置已保存',
     'Settings exported': '设置已导出',

@@ -62,6 +62,8 @@
 	);
 	/** 整卡显存（来自 manager 的 /api/system-metrics），拿不到就只展示大小不打分 */
 	let vramTotalGb = $state<number | null>(null);
+	/** GPU 盘点（来自 /api/gpu-cleanup）：用来扣掉桌面占用，得到与徽章一致的「可用预算」 */
+	let cleanupReport = $state<import('$lib/services').ManagerGpuCleanupReport | null>(null);
 	/** job_id -> 任务（轮询时整对象替换以触发响应式） */
 	let jobs = $state<Record<string, HfJob>>({});
 	let startError = $state<string | null>(null);
@@ -95,6 +97,22 @@
 	const quantLabel = $derived(
 		QUANT_OPTIONS.find((o) => o.value === quantFilter)?.label ?? 'All quants'
 	);
+	/** 桌面/其他程序占用的显存（GB）：整卡 used 减去我们自己的实例（单模型模式下加载新模型会顶掉旧的）。 */
+	const desktopGb = $derived.by(() => {
+		if (!cleanupReport?.gpu) return null;
+		const used = cleanupReport.gpu.used_mib;
+		if (used == null) return null;
+		const ours =
+			cleanupReport.processes
+				?.filter((p) => p.kind === 'managed' || p.kind === 'active')
+				.reduce((s, p) => s + (p.vram_mib ?? 0), 0) ?? 0;
+		return Math.max(0, (used - ours) / 1024);
+	});
+	/** 可用显存预算（GB）= 整卡 − 桌面占用。拿不到盘点就退回整卡（与旧行为一致）。 */
+	const availableGb = $derived.by(() => {
+		if (vramTotalGb == null) return null;
+		return Math.max(0, vramTotalGb - (desktopGb ?? 0));
+	});
 	/** 文件按大小排序方向（默认大到小 —— 大文件通常就是想找的完整量化） */
 	let filesDesc = $state(true);
 
@@ -132,6 +150,12 @@
 		ManagerService.systemMetrics()
 			.then((m) => {
 				vramTotalGb = m.vram_total_gb ?? null;
+			})
+			.catch(() => {});
+		// 拿 GPU 盘点：扣掉桌面占用，下载页的「Fits」才能和列表徽章用同一套可用预算
+		ManagerService.gpuCleanupStatus()
+			.then((r) => {
+				cleanupReport = r;
 			})
 			.catch(() => {});
 		// 恢复刷新前已在跑的任务
@@ -289,7 +313,7 @@
 		return 'f16';
 	}
 
-	/** 下载前的「能不能跑」：weights=size_gb + 结构估算 KV + 开销，对比整卡显存 */
+	/** 下载前的「能不能跑」：weights=size_gb + 结构估算 KV + 开销，对比**可用预算**（整卡 − 桌面占用）。 */
 	function fitVerdict(sizeGb: number, filename: string): { fits: boolean | null; total: number } {
 		if (!sizeGb || sizeGb <= 0) return { fits: null, total: 0 };
 
@@ -302,9 +326,9 @@
 		const est = estimateVram(sizeGb, cfg, null);
 
 		if (!est) return { fits: null, total: sizeGb };
-		if (vramTotalGb == null) return { fits: null, total: est.total_gb };
+		if (availableGb == null) return { fits: null, total: est.total_gb };
 
-		return { fits: est.total_gb <= vramTotalGb, total: est.total_gb };
+		return { fits: est.total_gb <= availableGb, total: est.total_gb };
 	}
 
 	async function startDownload(repo: string, f: HfFileSummary): Promise<void> {
@@ -390,19 +414,36 @@
 	}
 
 	/** 卡片上的「几个量化 · 大小区间 · 是否装得下」一行（数据来自搜索带回的 gguf_files）。 */
-	function repoSummary(r: HfRepoSummary): { n: number; minGb: number; maxGb: number; fits: boolean | null } {
+	function repoSummary(r: HfRepoSummary): {
+		n: number;
+		minGb: number;
+		maxGb: number;
+		fits: boolean | null;
+		unknown: boolean;
+	} {
+		// 拉取失败/未知：标 unknown，让界面显示「size unknown」而非误判 0 / Won't fit
+		if (r.gguf_files === null) {
+			return { n: 0, minGb: 0, maxGb: 0, fits: null, unknown: true };
+		}
 		const files = (r.gguf_files ?? []).filter((f) => !f.is_mmproj && f.size_gb > 0);
-		if (files.length === 0) return { n: 0, minGb: 0, maxGb: 0, fits: null };
+		if (files.length === 0) {
+			return { n: 0, minGb: 0, maxGb: 0, fits: null, unknown: false };
+		}
 		const sizes = files.map((f) => f.size_gb);
 		const minGb = Math.min(...sizes);
 		const maxGb = Math.max(...sizes);
 		let fits: boolean | null = null;
-		if (vramTotalGb != null) {
-			// 最小的量化都能上卡 → 整仓库可上卡（预算取整卡 90%，与徽章口径一致）
-			fits = minGb <= vramTotalGb * 0.9;
+		if (availableGb != null) {
+			// 视觉模型加载需要「主模型 + 投影层」，所以最小量化也要把 mmproj 算进去；
+			// 预算用「可用预算 × 0.9」（与列表徽章口径一致，已扣桌面占用）
+			const mmprojSizes = (r.gguf_files ?? [])
+				.filter((f) => f.is_mmproj && f.size_gb > 0)
+				.map((f) => f.size_gb);
+			const needGb = minGb + (mmprojSizes.length ? Math.min(...mmprojSizes) : 0);
+			fits = needGb <= availableGb * 0.9;
 		}
 
-		return { n: files.length, minGb, maxGb, fits };
+		return { n: files.length, minGb, maxGb, fits, unknown: false };
 	}
 
 	function fmtBytes(b: number): string {
@@ -470,7 +511,7 @@
 
 	<!-- 搜索前筛选：大小区间 + 量化档，随搜索一起发给 manager，搜出来的仓库本身就符合条件 -->
 	<div class="mb-4 flex flex-wrap items-center gap-2">
-		<span class="text-xs text-muted-foreground">筛选</span>
+		<span class="text-xs text-muted-foreground">Filter</span>
 		{#each SIZE_FILTERS as sf (sf.value)}
 			<button
 				class="rounded-full border px-2.5 py-0.5 text-xs transition-colors {sizeFilter ===
@@ -615,15 +656,21 @@
 									· <span>{r.lastModified.slice(0, 10)}</span>
 								{/if}
 							</span>
-							{#if (r.gguf_files ?? []).some((f) => !f.is_mmproj)}
+							<!-- gguf_files=null（拉取失败）也要进摘要块，否则「size unknown」徽章永远渲染不出来 -->
+							{#if r.gguf_files === null || (r.gguf_files ?? []).some((f) => !f.is_mmproj)}
 								<span class="shrink-0 text-xs text-muted-foreground">
-									<span>{repoSummary(r).n}</span><span class="ml-0.5">quants</span>
-									<span class="mx-1">·</span>
-									<span>{repoSummary(r).minGb.toFixed(1)}</span>–<span>{repoSummary(r).maxGb.toFixed(1)}</span><span class="ml-0.5">GB</span>
-									{#if repoSummary(r).fits === true}
-										<span class="ml-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-emerald-600">Fits</span>
-									{:else if repoSummary(r).fits === false}
-										<span class="ml-1 rounded-full bg-red-500/15 px-1.5 py-0.5 text-red-600">Won't fit</span>
+									{#if repoSummary(r).unknown}
+										<!-- 拉取失败时数字全是 0，显示出来只会误导 → 只给徽章 -->
+										<span class="ml-1 rounded-full bg-muted px-1.5 py-0.5 text-muted-foreground">size unknown</span>
+									{:else}
+										<span>{repoSummary(r).n}</span><span class="ml-0.5">quants</span>
+										<span class="mx-1">·</span>
+										<span>{repoSummary(r).minGb.toFixed(1)}</span>–<span>{repoSummary(r).maxGb.toFixed(1)}</span><span class="ml-0.5">GB</span>
+										{#if repoSummary(r).fits === true}
+											<span class="ml-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-emerald-600">Fits</span>
+										{:else if repoSummary(r).fits === false}
+											<span class="ml-1 rounded-full bg-red-500/15 px-1.5 py-0.5 text-red-600">Won't fit</span>
+										{/if}
 									{/if}
 								</span>
 							{/if}

@@ -2442,8 +2442,9 @@ def hf_http_json(url, timeout=20):
 
 
 _HF_SEARCH_CACHE = {}  # (q,sort) -> {"candidates":[{id,downloads,likes,lastModified,names}], "scanned":int, "exhausted":bool}
-_HF_FILES_CACHE = {}   # repo -> {"files":[...], "ts":float}  （hf_files 进程内缓存，避免重复拉 ?blobs=true）
+_HF_FILES_CACHE = {}   # repo -> {"files":[...], "ts":float, "fail":bool}  （hf_files 进程内缓存，避免重复拉 ?blobs=true）
 _HF_FILES_CACHE_TTL = 600
+_HF_FILES_FAIL_TTL = 60   # 拉取失败的短负缓存：避免抖动时每请求都打 HF，又不像成功那样缓存 10 分钟
 
 
 def _hf_repo_names(m):
@@ -2461,7 +2462,11 @@ def _hf_repo_names(m):
 
 
 def _hf_fetch_files_batch(repos):
-    """并发拉取一批仓库的 hf_files，返回 {repo: files}。失败记空列表。"""
+    """并发拉取一批仓库的 hf_files，返回 {repo: files|None}。
+
+    files 为列表 = 拉取成功（可能为空列表，即仓库确实无 .gguf）；
+    None = 拉取失败（网络抖动 / gated 401 等）—— 调用方须按「未知」保守处理，不能当空。
+    """
     if not repos:
         return {}
     res = {}
@@ -2471,9 +2476,9 @@ def _hf_fetch_files_batch(repos):
         for f in fut:
             r = fut[f]
             try:
-                res[r] = f.result()
+                res[r] = f.result()   # 可能为 None（拉取失败）
             except Exception:
-                res[r] = []
+                res[r] = None
     return res
 
 
@@ -2482,7 +2487,10 @@ def _hf_repo_passes(files, min_gb, max_gb, quant):
 
     一个模型家族仓库通常含多个量化，用户要的是「有我想要的那档」——
     只要任意一份文件满足大小区间（与/或）量化档即保留。
+    files 为 None（拉取失败 / 未知）时一律返回 True：保守保留，不冤枉好仓库。
     """
+    if files is None:
+        return True
     if not files:
         return False
     if quant:
@@ -2576,7 +2584,7 @@ def hf_search(q, limit=30, sort="downloads", skip=0, min_gb=None, max_gb=None, q
         chunk = qpass[idx: idx + batch]
         fmap = _hf_fetch_files_batch([c["id"] for c in chunk])
         for c in chunk:
-            files = fmap.get(c["id"], [])
+            files = fmap.get(c["id"])   # None=拉取失败/未知；[]=确实无 gguf；list=成功
             if _hf_repo_passes(files, min_gb, max_gb, quant):
                 matched.append({
                     "id": c["id"],
@@ -2595,15 +2603,27 @@ def hf_search(q, limit=30, sort="downloads", skip=0, min_gb=None, max_gb=None, q
 
 
 def hf_files(repo):
-    """取某仓库的 .gguf 文件清单 + 大小（?blobs=true；full=true 不带 lfs.size，必须用这个）。带进程内缓存。"""
+    """取某仓库的 .gguf 文件清单 + 大小（?blobs=true；full=true 不带 lfs.size，必须用这个）。
+
+    返回：
+      - 列表（可能为空）= 拉取成功；空列表即仓库确实无 .gguf。
+      - None = 拉取失败（网络抖动 / gated 401 等）。
+    失败**不写长缓存**（否则一次瞬断会被当成空仓库缓存 10 分钟），只写 60s 负缓存防重试风暴。
+    """
     now = time.time()
     c = _HF_FILES_CACHE.get(repo)
-    if c and now - c["ts"] < _HF_FILES_CACHE_TTL:
-        return c["files"]
+    if c is not None:
+        if c.get("fail"):
+            if now - c["ts"] < _HF_FILES_FAIL_TTL:
+                return None
+            # 负缓存过期 → 下面重试
+        else:
+            return c["files"]
     try:
         data = hf_http_json("%s/models/%s?blobs=true" % (HF_API, repo), timeout=25)
     except Exception:
-        data = None
+        _HF_FILES_CACHE[repo] = {"files": [], "ts": now, "fail": True}
+        return None
     out = []
     if data:
         for s in (data.get("siblings") or []):
@@ -2621,7 +2641,7 @@ def hf_files(repo):
             })
     # 真模型排前面（大→小），mmproj 垫后
     out.sort(key=lambda x: (x["is_mmproj"], -x["size_bytes"]))
-    _HF_FILES_CACHE[repo] = {"files": out, "ts": now}
+    _HF_FILES_CACHE[repo] = {"files": out, "ts": now, "fail": False}
     return out
 
 
@@ -3308,7 +3328,12 @@ class Handler(BaseHTTPRequestHandler):
                 if not repo:
                     self.json(400, {"ok": False, "error": "repo required"})
                 else:
-                    self.json(200, {"ok": True, "repo": repo, "files": hf_files(repo)})
+                    files = hf_files(repo)
+                    if files is None:
+                        self.json(200, {"ok": False, "repo": repo,
+                                        "files": [], "error": "fetch failed"})
+                    else:
+                        self.json(200, {"ok": True, "repo": repo, "files": files})
             elif p == "/api/hf-downloads":
                 with HF_JOBS_LOCK:
                     jobs = [dict(j) for j in HF_JOBS.values()]

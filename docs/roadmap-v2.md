@@ -869,6 +869,27 @@ webui/manager_pkg/
 > - **SSL 降级**：`_hf_ssl_ctx()` 首次探测默认校验，证书链异常（沙箱代理证书过期）则缓存
 >   不校验上下文 —— 不降级时 `hf_search` 吞异常永远返回空列表，极难排查。
 
+> **下载器审计：两个真实糙边修复（9-24，`overlay.js?v=90`）**：
+> - **bug #1（后端，致命）：`hf_files` 拉取失败被当成「空仓库」缓存 10 分钟 + 大小筛选误杀**。
+>   原 `hf_files` 失败（网络抖动/gated 401）返回 `[]` 且写 10min 成功缓存；`hf_search` 带大小筛选时
+>   `files=[]` 喂 `_hf_repo_passes` → False，**合规仓库被静默误杀**，卡片显示「0 quants · 0.0 GB」。
+>   修复：`hf_files` 失败返回 `None` + **60s 负缓存**（`_HF_FILES_FAIL_TTL`）；`_hf_fetch_files_batch` /
+>   `_hf_repo_passes` / `hf_search` / `/api/hf-files` 全链路 `None` 感知（失败仓库保守保留，不误杀）；
+>   端点回 `{"ok":false,"error":"fetch failed"}`。**运行时实测**：无效仓库旧代码回 `ok:true,files:[]`，新代码回 `ok:false` ✅。
+> - **bug #2（前端）：下载页「Fits」口径与列表徽章不一致 + 漏算 mmproj**。下载页用整卡 ×0.9，
+>   徽章用「(整卡 − 桌面占用) ×0.9」（本机差 ~2.5GB），且 `needGb` 没算 mmproj（~645MB）——
+>   会出现「下载页说 Fits、加载时徽章说装不下」。修复：下载页接 `/api/gpu-cleanup` 算
+>   `availableGb = 整卡 − 桌面占用`，`fitVerdict`/`repoSummary` 统一口径；`needGb` 加最小 mmproj；
+>   `gguf_files === null` 显示「size unknown（大小未知）」徽章而非误判。
+> - **连带发现（探针抓出来的真 bug）**：摘要块外层守卫 `(r.gguf_files ?? []).some(...)` 在
+>   `null` 时恒假 → 「size unknown」分支是**死代码**。改为 `r.gguf_files === null || …` 直通；
+>   unknown 时只显示徽章、不给「0个量化 · 0.0–0.0GB」误导数字。顺手清了筛选条漏翻的硬编码中文
+>   （「筛选」→ `Filter` + DICT）。
+> - **验收**：新探针 `tools/ui/probe_size_unknown.mjs`（Playwright 路由 mock，机器无关——
+>   实测本机当时外部进程占了 5.4GB 显存，4GB 模型真装不下，Fits 断言必须 mock GPU 盘点才稳定）
+>   **8/8**；全量回归 `probe_download_page.mjs` **28/28**；CJK 审计 0 处；
+>   出图 `diag/shots-20260924-size-unknown/`。
+
 ### 第 3 批（2 天 · 可观测性）
 9. **F GPU 健康 / 归因面板**
 10. **E 一键基准 + 留档**（轻量档先上，严格档后补）
