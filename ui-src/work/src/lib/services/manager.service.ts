@@ -524,6 +524,13 @@ export class ManagerService {
 	}
 
 	/**
+	 * 删除一条下载任务记录（仅终态任务；进行中的任务后端回 409）。
+	 */
+	static hfDownloadRemove(jobId: string): Promise<{ ok: boolean; removed?: string }> {
+		return managerFetch(`/api/hf-download/${jobId}/remove`, { method: 'POST' });
+	}
+
+	/**
 	 * 一键换模型。
 	 *
 	 * manager 会：① 停掉自己托管的全部实例 → ② 腾出目标端口（结束占用该端口的

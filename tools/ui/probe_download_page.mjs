@@ -3,13 +3,15 @@
  *
  * 需要：8080 哨兵（页面）+ 8090 manager（带 /api/hf-* 新端点）+ 外网可达 huggingface.co。
  *
- * 验的是六件事：
+ * 验证八件事：
  *   ① #/download 路由可达，页面标题渲染（overlay 中文化生效）；
  *   ② 侧边栏出现「模型下载」入口（折叠态是图标 + title，展开态是文字）；
  *   ③ 搜索 "qwen2.5 0.5b gguf" 能返回结果列表（真实 HF API）；
  *   ④ 展开仓库能拉到 .gguf 文件清单（大小 + 可上卡徽章）；
- *   ⑤ 点「下载」会创建任务并出现进度条（下载任务卡片）；
- *   ⑥ 取消按钮可把任务停掉（已取消）。
+ *   ⑤ 文件列表大小筛选 chips（>6GB → 空态文案；全部大小 → 文件回来）+ 排序方向切换；
+ *   ⑥ 点「下载」会创建任务并出现进度条（下载任务卡片）；
+ *   ⑦ 取消按钮可把任务停掉（已取消）→ 终态卡片出现「删除记录」→ 点击后卡片消失；
+ *   ⑧ 磁盘余量检查：POST total_bytes=99TB → 400 且报明确数字（不打 UI，直接打 manager API）。
  *
  * ⚠️ bodyText() 是异步的，**必须 await** —— 上一版漏了 await，正则全在测
  *    "[object Promise]"，13 个断言集体假阴性（页面本身是好的，截图为证）。
@@ -106,7 +108,49 @@ check('可上卡徽章（小模型应 Fits）', /可上卡|Fits/.test(text));
 check('下载按钮存在', /下载|Download/.test(text));
 await page.screenshot({ path: `${OUT}/02-files-with-badges.png` });
 
-say('场景 5：点下载 → 任务卡片 + 进度条');
+say('场景 5：文件列表大小筛选 + 排序切换');
+text = await bodyText();
+check(
+	'筛选条出现（0.5B 仓库多量化 → 多于 1 个文件）',
+	/全部大小|All sizes/.test(text) && /< 3 GB/.test(text)
+);
+// '> 6 GB'：0.5B 模型全部量化都在 6GB 以下 → 必出空态文案
+await page
+	.getByRole('button', { name: /^> 6 GB$/ })
+	.first()
+	.click();
+await page.waitForFunction(
+	() => /没有符合该大小筛选|No files match/.test(document.body.innerText || ''),
+	undefined,
+	{ timeout: 5000 }
+);
+text = await bodyText();
+check("'> 6 GB' 筛选出空态文案", /没有符合该大小筛选|No files match/.test(text));
+// 排序方向按钮：点一下切回升序（图标切换，无文字 —— 靠 GB 序列验证）
+const gbSeq = () =>
+	page.$$eval('ul ul span.font-mono', (els) =>
+		els.map((e) => parseFloat(e.textContent || '0')).filter((v) => !Number.isNaN(v))
+	);
+// 先回到全部大小，让列表有内容
+await page
+	.getByRole('button', { name: /^(全部大小|All sizes)$/ })
+	.first()
+	.click();
+await page.waitForFunction(
+	() => !/没有符合该大小筛选|No files match/.test(document.body.innerText || ''),
+	undefined,
+	{ timeout: 5000 }
+);
+const seq0 = await gbSeq();
+check('默认排序为大到小', seq0.length >= 2 && seq0[0] >= seq0[seq0.length - 1], JSON.stringify(seq0));
+await page.locator('button.ml-auto').first().click();
+await page.waitForTimeout(300);
+const seq1 = await gbSeq();
+check('点击后反转为小到大', seq1[0] <= seq1[seq1.length - 1], JSON.stringify(seq1));
+check('筛选空态不残留文件', seq1.length === seq0.length);
+await page.screenshot({ path: `${OUT}/05-size-filter-sort.png` });
+
+say('场景 6：点下载 → 任务卡片 + 进度条');
 // 选最小的那个量化（列表按大小降序 → 最后一个非 mmproj 文件）
 const dlButtons = page.getByRole('button', { name: /^(下载|Download)$/ });
 const n = await dlButtons.count();
@@ -130,7 +174,7 @@ check('下载任务卡片出现', /下载任务|Downloads/.test(text));
 check('进度数字非零（total 从 blobs 拿到）', !/0 MB \/ 0 MB/.test(text));
 await page.screenshot({ path: `${OUT}/03-download-progress.png` });
 
-say('场景 6：取消任务');
+say('场景 7：取消任务 → 终态出现「删除记录」→ 点击删除');
 const cancelBtn = page.getByRole('button', { name: /^(取消|Cancel)$/ }).first();
 if ((await cancelBtn.count()) > 0) {
 	await cancelBtn.click();
@@ -144,7 +188,37 @@ if ((await cancelBtn.count()) > 0) {
 } else {
 	check('任务变为已取消', false, '未找到取消按钮');
 }
-await page.screenshot({ path: `${OUT}/04-after-cancel.png` });
+await page.screenshot({ path: `${OUT}/06-after-cancel.png` });
+// 取消是终态 → 卡片右下应出现「删除记录」（垃圾桶 + 文字）
+const delBtn = page.getByRole('button', { name: /删除记录|Delete record/ }).first();
+if ((await delBtn.count()) > 0) {
+	await delBtn.click();
+	await page.waitForFunction(
+		() => !/已取消|Canceled/.test(document.body.innerText || ''),
+		undefined,
+		{ timeout: 8000 }
+	);
+	text = await bodyText();
+	check('点击删除记录后卡片消失', !/已取消|Canceled/.test(text));
+} else {
+	check('点击删除记录后卡片消失', false, '终态卡片上没有「删除记录」按钮');
+}
+await page.screenshot({ path: `${OUT}/07-after-remove.png` });
+
+say('场景 8：磁盘余量检查（manager API 直测，不走 UI）');
+const diskResp = await page.request.post(`${BASE.replace(/:\d+$/, '')}:8090/api/hf-download`, {
+	data: {
+		repo: 'Qwen/Qwen2.5-0.5B-Instruct-GGUF',
+		filename: 'disk-check-probe.gguf',
+		total_bytes: 99 * 1024 ** 4
+	}
+});
+const diskJson = await diskResp.json().catch(() => ({}));
+check(
+	'磁盘不足被 400 拒绝且报明确数字',
+	diskResp.status() === 400 && /磁盘空间不足/.test(diskJson.error || ''),
+	`status=${diskResp.status()} error=${(diskJson.error || '').slice(0, 60)}`
+);
 
 check('无页面 JS 错误', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
 

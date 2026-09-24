@@ -10,12 +10,16 @@
 	 * 新模型直接出现在本地模型列表与聊天框选择器里。
 	 */
 	import {
+		ArrowDownWideNarrow,
+		ArrowUpNarrowWide,
 		Check,
 		ChevronDown,
 		ChevronRight,
 		Download as DownloadIcon,
+		FolderOpen,
 		LoaderCircle,
 		Search,
+		Trash2,
 		TriangleAlert
 	} from '@lucide/svelte';
 	import { Button } from '$lib/components/ui/button';
@@ -50,6 +54,18 @@
 	let jobs = $state<Record<string, HfJob>>({});
 	let startError = $state<string | null>(null);
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+	/** 文件列表大小筛选（全局一套；<3GB = 8GB 卡的舒适区，3~6GB 看量化，>6GB 基本装不下） */
+	const SIZE_FILTERS = [
+		{ value: 'all', label: 'All sizes' },
+		{ value: 'small', label: '< 3 GB' },
+		{ value: 'mid', label: '3-6 GB' },
+		{ value: 'large', label: '> 6 GB' }
+	] as const;
+	type SizeFilter = (typeof SIZE_FILTERS)[number]['value'];
+	let sizeFilter = $state<SizeFilter>('all');
+	/** 文件按大小排序方向（默认大到小 —— 大文件通常就是想找的完整量化） */
+	let filesDesc = $state(true);
 
 	const activeJobList = $derived(Object.values(jobs));
 
@@ -190,6 +206,36 @@
 		}
 	}
 
+	/** 删除一条终态任务记录（仅把卡片从列表摘掉，磁盘上的模型文件不动） */
+	async function removeJob(id: string): Promise<void> {
+		try {
+			await ManagerService.hfDownloadRemove(id);
+			const next = { ...jobs };
+			delete next[id];
+			jobs = next;
+		} catch {
+			// 删不掉（409/404）就留着，不影响其他操作
+		}
+	}
+
+	/** 打开下载所在文件夹（/api/open-path 白名单含 models/from-hf） */
+	function openFolder(j: HfJob): void {
+		void ManagerService.openPath(j.dest).catch(() => {});
+	}
+
+	/** 展开区文件列表：先按大小筛、再按大小排序 */
+	function visibleFiles(repo: string): HfFileSummary[] {
+		const list = (filesByRepo[repo] ?? []).filter((f) => {
+			if (sizeFilter === 'small') return f.size_gb < 3;
+			if (sizeFilter === 'mid') return f.size_gb >= 3 && f.size_gb <= 6;
+			if (sizeFilter === 'large') return f.size_gb > 6;
+
+			return true;
+		});
+
+		return [...list].sort((a, b) => (filesDesc ? b.size_gb - a.size_gb : a.size_gb - b.size_gb));
+	}
+
 	function fmtBytes(b: number): string {
 		if (!b || b <= 0) return '0 MB';
 		const gb = b / 1024 ** 3;
@@ -304,11 +350,24 @@
 						</div>
 						<div class="mt-1 flex items-center justify-between">
 							<span class="min-w-0 truncate text-xs text-muted-foreground">{j.repo}</span>
-							{#if !isTerminal(j.status)}
-								<Button variant="ghost" size="sm" onclick={() => void cancelDownload(j.id)}>
-									Cancel
-								</Button>
-							{/if}
+							<div class="flex shrink-0 items-center gap-1">
+								{#if !isTerminal(j.status)}
+									<Button variant="ghost" size="sm" onclick={() => void cancelDownload(j.id)}>
+										Cancel
+									</Button>
+								{:else}
+									{#if j.status === 'completed'}
+										<Button variant="ghost" size="sm" onclick={() => openFolder(j)}>
+											<FolderOpen class="h-3.5 w-3.5" />
+											<span>Open folder</span>
+										</Button>
+									{/if}
+									<Button variant="ghost" size="sm" onclick={() => void removeJob(j.id)}>
+										<Trash2 class="h-3.5 w-3.5" />
+										<span>Delete record</span>
+									</Button>
+								{/if}
+							</div>
 						</div>
 					</li>
 				{/each}
@@ -355,8 +414,37 @@
 										Loading files…
 									</p>
 								{:else}
+								<!-- 文件多于 1 个才显示筛选/排序条，单文件仓库没必要 -->
+								{#if (filesByRepo[r.id] ?? []).length > 1}
+									<div class="mb-2 flex items-center gap-1.5">
+										{#each SIZE_FILTERS as sf (sf.value)}
+											<button
+												class="rounded-full border px-2 py-0.5 text-xs transition-colors {sizeFilter ===
+												sf.value
+													? 'border-primary bg-primary/10 text-primary'
+													: 'border-border text-muted-foreground hover:text-foreground'}"
+												onclick={() => (sizeFilter = sf.value)}
+											>
+												{sf.label}
+											</button>
+										{/each}
+										<button
+											class="ml-auto rounded-md border border-border p-1 text-muted-foreground hover:text-foreground"
+											onclick={() => (filesDesc = !filesDesc)}
+										>
+											{#if filesDesc}
+												<ArrowDownWideNarrow class="h-3.5 w-3.5" />
+											{:else}
+												<ArrowUpNarrowWide class="h-3.5 w-3.5" />
+											{/if}
+										</button>
+									</div>
+								{/if}
+								{#if visibleFiles(r.id).length === 0}
+									<p class="py-2 text-sm text-muted-foreground">No files match this size filter.</p>
+								{:else}
 									<ul class="flex flex-col gap-2">
-										{#each filesByRepo[r.id] ?? [] as f (f.filename)}
+										{#each visibleFiles(r.id) as f (f.filename)}
 											<li
 												class="flex items-center gap-3 rounded-md border border-border bg-card px-3 py-2"
 											>
@@ -395,6 +483,7 @@
 											</li>
 										{/each}
 									</ul>
+								{/if}
 								{/if}
 							</div>
 						{/if}

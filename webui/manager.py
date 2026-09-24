@@ -12,7 +12,7 @@
 # 跨域已放开（Access-Control-Allow-Origin: *），便于 UI 从不同端口调用。
 # 运行：python manager.py   （默认 http://127.0.0.1:8090）
 # ============================================================
-import os, sys, re, json, time, uuid, subprocess, threading, math, socket, gzip, email.utils
+import os, sys, re, json, time, uuid, subprocess, threading, math, socket, gzip, email.utils, shutil
 import urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -2384,13 +2384,20 @@ IMMUTABLE_PREFIXES = ("/_app/immutable/", "/static/")
 #  - /api/hf-download POST       下载（后台线程，默认 4 连接分段并行 + 断点续传）
 #  - /api/hf-download/<id>       GET 进度
 #  - /api/hf-download/<id>/cancel POST 取消
+#  - /api/hf-download/<id>/remove POST 删除记录（仅终态任务）
 #  - /api/hf-downloads           列出全部任务（前端刷新后恢复）
 #
 # ⚠️ 续传机制见 tools/model/hf_range_probe.py：HF 的 resolve URL 会 302 重定向到 CDN，
 #    urllib 在重定向时**默认不**把 Range 带到重定向请求上 —— 这里手动捕获 Location
 #    并重发带 Range 的请求（实测 get 206 + 仅返回尾部），兼容所有 Python 版本。
 # ============================================================
-HF_API = "https://huggingface.co/api"
+# HF 主站被墙/抽风时可设环境变量切镜像（如 HF_API_BASE=https://hf-mirror.com，
+# 镜像是完整反代，API 与 resolve 路径同构）。默认走官方。
+import ssl
+import urllib.error
+
+HF_BASE = (os.environ.get("HF_API_BASE") or "https://huggingface.co").rstrip("/")
+HF_API = HF_BASE + "/api"
 HF_HEADERS = {"User-Agent": "llama-desk/1.0"}
 HF_JOBS = {}                       # job_id -> dict（线程安全的任务表）
 HF_JOBS_LOCK = threading.Lock()
@@ -2402,9 +2409,34 @@ class _HFNoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+_HF_SSL_CTX = None
+
+
+def _hf_ssl_ctx():
+    """首次调用做一次探测：默认严格校验失败（沙箱/代理链证书过期、自签）
+    就缓存「不校验」上下文，后续 HF 请求全部复用。
+    降级风险可接受：搜索/清单只是展示数据；GGUF 下载有「最终大小 == lfs.size」兜底。"""
+    global _HF_SSL_CTX
+    if _HF_SSL_CTX is None:
+        ctx = ssl.create_default_context()
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(HF_BASE + "/api/models?limit=1", headers=HF_HEADERS),
+                timeout=8,
+                context=ctx,
+            ).close()
+        except urllib.error.URLError as e:
+            if isinstance(getattr(e, "reason", None), ssl.SSLError):
+                ctx = ssl._create_unverified_context()
+        except OSError:
+            pass
+        _HF_SSL_CTX = ctx
+    return _HF_SSL_CTX
+
+
 def hf_http_json(url, timeout=20):
     req = urllib.request.Request(url, headers=HF_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(req, timeout=timeout, context=_hf_ssl_ctx()) as r:
         return json.loads(r.read().decode("utf-8"))
 
 
@@ -2491,7 +2523,8 @@ HF_MIN_SEG_TOTAL = 64 * 1024 * 1024
 
 def _hf_resolve(url):
     """拿 resolve 的最终 CDN 地址（手动跟一次 302，便于对 CDN 直接发 Range）。"""
-    opener = urllib.request.build_opener(_HFNoRedirect())
+    opener = urllib.request.build_opener(
+        _HFNoRedirect(), urllib.request.HTTPSHandler(context=_hf_ssl_ctx()))
     try:
         resp = opener.open(urllib.request.Request(url, headers=HF_HEADERS), timeout=30)
         status, loc = resp.status, resp.headers.get("Location")
@@ -2507,7 +2540,7 @@ def _hf_probe_total(url):
     """Content-Length 未知时，用 Range: bytes=0-0 探测全文件大小。"""
     try:
         req = urllib.request.Request(url, headers=dict(HF_HEADERS, Range="bytes=0-0"))
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=30, context=_hf_ssl_ctx()) as r:
             cr = r.headers.get("Content-Range") or ""
             if "/" in cr:
                 return int(cr.split("/")[-1])
@@ -2581,12 +2614,26 @@ def _hf_sync_progress(job):
 
 
 def hf_download_start(repo, filename, dest_name=None, total_bytes=0, accel=True):
-    """建任务 + 起后台线程下载（默认多连接分段，断点续传）。返回任务 dict。"""
+    """建任务 + 起后台线程下载（默认多连接分段，断点续传）。返回任务 dict。
+    磁盘余量不足时 raise ValueError（路由转 400），不建任务。"""
     dest_dir = os.path.join(WEBUI_DIR, "..", "models", "from-hf", _hf_safe_name(repo))
     try:
         os.makedirs(dest_dir, exist_ok=True)
     except OSError:
         pass
+    # 磁盘余量检查：需要 文件大小 + 2GB 缓冲（写 sidecar/系统余量）。
+    # total_bytes 未知（0）时只要求 2GB 底线 —— 反正单流路径会自己探测大小。
+    try:
+        need = int(total_bytes or 0) + 2 * 1024 ** 3
+        free = shutil.disk_usage(dest_dir).free
+        if free < need:
+            raise ValueError(
+                "磁盘空间不足：需要 %.1f GB，当前仅剩 %.1f GB（%s）"
+                % (need / 1024 ** 3, free / 1024 ** 3, dest_dir))
+    except ValueError:
+        raise
+    except OSError:
+        pass  # 拿不到磁盘信息就不拦（别让检查本身卡死下载）
     dest = os.path.join(dest_dir, dest_name or filename)
     job_id = uuid.uuid4().hex
     job = {
@@ -2610,7 +2657,7 @@ def _hf_single_stream(job, url, start):
     if start > 0:
         hdr["Range"] = "bytes=%d-" % start
     req = urllib.request.Request(url, headers=hdr)
-    with urllib.request.urlopen(req, timeout=90) as r:
+    with urllib.request.urlopen(req, timeout=90, context=_hf_ssl_ctx()) as r:
         cl = r.headers.get("Content-Length")
         cr = r.headers.get("Content-Range")
         total = job.get("total_bytes") or 0
@@ -2658,7 +2705,7 @@ def _hf_segment_thread(job, seg, url):
         hdr = dict(HF_HEADERS, Range="bytes=%d-%d" % (pos, end))
         try:
             req = urllib.request.Request(url, headers=hdr)
-            with urllib.request.urlopen(req, timeout=90) as r:
+            with urllib.request.urlopen(req, timeout=90, context=_hf_ssl_ctx()) as r:
                 if r.status != 206:
                     job["error"] = "server ignored Range (status %d)" % r.status
                     with HF_JOBS_LOCK:
@@ -2767,7 +2814,7 @@ def _hf_download_worker(job_id):
     if not job:
         return
     dest = job["dest"]
-    resolve = "https://huggingface.co/%s/resolve/main/%s" % (job["repo"], job["filename"])
+    resolve = "%s/%s/resolve/main/%s" % (HF_BASE, job["repo"], job["filename"])
     job["status"] = "starting"
     try:
         url = _hf_resolve(resolve)
@@ -3137,9 +3184,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not repo or not filename:
                     self.json(400, {"ok": False, "error": "repo and filename required"})
                 else:
-                    job = hf_download_start(repo, filename, dest_name,
-                                            total_bytes=total_bytes, accel=accel)
-                    self.json(200, {"ok": True, "job": dict(job)})
+                    try:
+                        job = hf_download_start(repo, filename, dest_name,
+                                                total_bytes=total_bytes, accel=accel)
+                    except ValueError as e:
+                        # 磁盘余量不足等可预见的拒绝 —— 400 + 明确数字，不是 500
+                        self.json(400, {"ok": False, "error": str(e)})
+                    else:
+                        self.json(200, {"ok": True, "job": dict(job)})
             elif p.startswith("/api/hf-download/") and p.endswith("/cancel"):
                 jid = p[len("/api/hf-download/"):-len("/cancel")].strip("/")
                 with HF_JOBS_LOCK:
@@ -3150,6 +3202,23 @@ class Handler(BaseHTTPRequestHandler):
                             job["status"] = "canceling"
                 self.json(200, {"ok": job is not None, "id": jid,
                                 "status": job["status"] if job else None})
+            elif p.startswith("/api/hf-download/") and p.endswith("/remove"):
+                # 删除任务记录：只允许终态（completed/canceled/error）。
+                # 进行中的任务请先 cancel —— 防止把后台线程手里的 job dict 删掉。
+                jid = p[len("/api/hf-download/"):-len("/remove")].strip("/")
+                terminal = ("completed", "canceled", "error")
+                with HF_JOBS_LOCK:
+                    job = HF_JOBS.get(jid)
+                    removable = bool(job and job["status"] in terminal)
+                    active = bool(job and not removable)
+                    if removable:
+                        del HF_JOBS[jid]
+                if removable:
+                    self.json(200, {"ok": True, "removed": jid})
+                elif active:
+                    self.json(409, {"ok": False, "error": "任务仍在进行中，请先取消"})
+                else:
+                    self.json(404, {"ok": False, "error": "job not found"})
             elif p.startswith("/api/hf-download/"):
                 jid = p[len("/api/hf-download/"):].strip("/")
                 with HF_JOBS_LOCK:
