@@ -125,7 +125,7 @@ node tools/ui/ui_probe.mjs http://127.0.0.1:8080
 | `bench_128k.py <port> [all\|prefill\|tg]` | 128K 上下文的预填充 / 生成速度基准。 |
 | `bench_compare.py` | 多配置横向对比。 |
 | `bench_needle.py <port> [target_k]` | 大海捞针（needle-in-a-haystack）长上下文检索测试。 |
-| `bench_result.md` / `bench_longctx_result.md` | 上述基准的历史结果记录。 |
+| `bench_result.md` / `bench_longctx_result.md` | 上述基准的历史结果（已归档至 `docs/archive/bench/`，重跑脚本生成新结果）。 |
 
 ---
 

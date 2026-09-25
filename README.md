@@ -132,9 +132,11 @@ NVIDIA 工具时，页面顶部会挂一条指引条告诉你缺什么、路径�
 ├─ app\                   Tauri 外壳工程 + config.json + logs\ + .webview\
 ├─ tools\                 全部辅助脚本，见 tools\README.md
 ├─ tests\                 manager 离线回归测试（python tests\run_tests.py）
-├─ docs\                  roadmap 与专题笔记（docs\notes\*.md）
+├─ docs\                  文档：INDEX.md（地图）+ roadmap-v2.md + release-guide.md
+│   ├─ notes\             专题笔记（显存/缓存/硬件/性能…）
+│   └─ archive\           历史诊断与基准报告（只读归档）
 ├─ rollback\              部署回滚点（deploy.ps1 自动，只留 3 份）
-└─ diag\                  诊断报告 / 探针截图（只入库 *.md）
+└─ diag\                  探针截图等现场产物（报告已归档至 docs\archive\diag\）
 ```
 
 ### 三个容易混的「备份」目录

@@ -1,7 +1,7 @@
 # 速度归因方法论 · 后端性能问题
 
 > 从 `.workbuddy/memory/MEMORY.md` 外置的细节。**遇到「生成慢」、怀疑后端偷偷耗资源时必读。**
-> 完整报告：`diag/slow-generation-rootcause.md`（速度）、`diag/architecture-review.md`（后端）。
+> 完整报告：`../archive/diag/slow-generation-rootcause.md`（速度）、`../archive/diag/architecture-review.md`（后端）。
 
 ## 1. ⭐ 速度归因：先建基线，再谈异常
 
