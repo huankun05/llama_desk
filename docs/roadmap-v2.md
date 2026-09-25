@@ -1073,4 +1073,25 @@ webui/manager_pkg/
   ⚠️ 真机体验路径：设置 → 备份管理 → 选文件夹 → 开开关 →（到点后）备份列表出现
   `auto-backup_*`。
 
+**备份文件夹重复确认修复 ✅（9-25 下午，用户反馈「每次启动都要重新确认」）**：
+- **根因**：WebView2 每次重启把 FSA 权限降回 `prompt`（Chromium 安全模型，即使
+  `kFileSystemAccessPersistentPermissions` 桌面版默认启用——但我们的交互流程永远
+  没让用户拿到「每次访问时都允许」的选项）。启动时 `init()` 无手势 →
+  `requestPermission` 抛 SecurityError → 句柄被丢弃；点「选择文件夹」走的是完整
+  目录选择器而不是对旧句柄补授权 → 每次都要重选一遍。
+- **修复**（纯前端，外壳无需重编）：① `chooseBackupDirectory` 先对持久化句柄
+  `requestPermission`（三方提示选「每次访问时都允许」即永久），失败才退回选择器；
+  ② 新增 `getBackupDirStatus()`（none/granted/needs-grant）与
+  `requestBackupDirRegrant()`；③ layout 在**首次用户手势**（pointerdown/keydown
+  一次性捕获监听）静默补授权，成功后立刻补跑一次 `maybeAutoBackup`；④ 设置页
+  needs-grant 琥珀色提示条 + 「Re-grant access」一键补授权按钮（失败退回选择器）。
+- **顺带清债**：`services/index.ts` barrel 补导出 7 个类型（ManagerGpuHistory /
+  ManagerBenchLight / ManagerModelMeta / ManagerTrashInfo / ManagerTrashCleared /
+  ModelDeleteCheck / ManagerEnvCheck）——16 个 svelte-check 报错全由此起；
+  `DialogModelInformation` 的 `modelName` 挪到 `firstModel` 声明之后
+  （used-before-declaration ×2）。**svelte-check 0 错 0 警**（历史首次归零）。
+- 验收：probe_model_meta 4/4、probe_env_check 7/7、probe_settings_page 12/12
+  （哨兵态 0 失败）；部署 `overlay.js?v=107`；DICT +3 词条（Re-grant access /
+  needs-grant 提示 / 补授权 toast）。
+
 **第 2 级 ✅ 已完成（9-25，见上方收尾记录）**：跨平台进程管理（`procinfo.py`）+ 无 NVIDIA 降级盘点（unknown verdict、既有空值兜底确认）。AMD/Intel 完整支持与 macOS/Linux 移植成本高，仍不建议。

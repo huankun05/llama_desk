@@ -364,11 +364,20 @@ export type {
 	ManagerLaunchPayload,
 	ManagerModel,
 	ManagerSystemMetrics,
-	// ⚠️ 这两个必须一起导出：性能页是从 `$lib/services` 取它们的。
+	// ⚠️ 这一批必须一起导出：弹窗/横幅/性能页/下拉都从 `$lib/services` 取它们。
 	//   漏了不会让 vite build 失败（构建期不做类型检查），但 svelte-check 会报
 	//   "has no exported member"，把真正的错误淹掉。
 	ManagerGpuCleanupReport,
 	ManagerGpuCleanupResult,
+	ManagerGpuHistory,
+	ManagerBenchLight,
+	// ③ 模型标签/收藏/备注/删除（meta.py 对应的 4 个接口类型）
+	ManagerModelMeta,
+	ManagerTrashInfo,
+	ManagerTrashCleared,
+	ModelDeleteCheck,
+	// 开源化第 1 级：环境自检
+	ManagerEnvCheck,
 	// 第 2 批 A：HuggingFace 下载器
 	HfDownloadsResponse,
 	HfFileSummary,

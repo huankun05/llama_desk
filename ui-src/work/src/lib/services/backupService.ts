@@ -122,9 +122,45 @@ async function ensurePermission(
 }
 
 /**
+ * 备份目录的授权状态：
+ * - 'none'：从未选过文件夹（IndexedDB 里没有句柄）
+ * - 'granted'：句柄存在且 readwrite 权限当前有效
+ * - 'needs-grant'：句柄存在但权限降回 prompt（WebView2 重启后的正常现象，
+ *   Chromium ≥122 桌面版默认启用持久权限，在提示里选「每次访问时都允许」即永久）
+ */
+export type BackupDirStatus = 'none' | 'granted' | 'needs-grant';
+
+/** 查询持久化句柄的授权状态（不弹任何窗、不需要手势）。 */
+export async function getBackupDirStatus(): Promise<BackupDirStatus> {
+	if (!supportsFSA()) return 'none';
+	const handle = await loadDirHandle();
+	if (!handle) return 'none';
+	try {
+		const q = await (handle as unknown as {
+			queryPermission?: (o: { mode: string }) => Promise<PermissionState>;
+		}).queryPermission?.({ mode: 'readwrite' });
+		return q === 'granted' ? 'granted' : 'needs-grant';
+	} catch {
+		return 'needs-grant';
+	}
+}
+
+/**
+ * 对已持久化的句柄补授权（requestPermission）。
+ * ⚠️ 必须在用户手势（点击 / 按键回调）里调用，否则 Chromium 直接抛 SecurityError。
+ * 成功 = 用户在提示里点了「允许」（无论哪种），返回 true。
+ */
+export async function requestBackupDirRegrant(): Promise<boolean> {
+	const handle = await loadDirHandle();
+	if (!handle) return false;
+	return ensurePermission(handle, 'readwrite');
+}
+
+/**
  * 取得可用的备份目录句柄。
  * - interactive=false：仅返回已持久化且仍有权限的句柄，没有则返回 null（不弹窗）。
- * - interactive=true：没有句柄或权限失效时弹出系统目录选择器，并持久化。
+ * - interactive=true：权限失效时先尝试对旧句柄补授权（一次「允许」即可，触发
+ *   Chromium ≥122 的三方提示可顺便选「每次访问都允许」永久授权），失败再弹选择器。
  */
 export async function getBackupDirHandle(
 	interactive = false
@@ -134,6 +170,8 @@ export async function getBackupDirHandle(
 	if (handle) {
 		const ok = await ensurePermission(handle, 'readwrite');
 		if (ok) return handle;
+		if (!interactive) return null;
+		// 补授权失败（无手势或被拒）→ 只有这条路能走到，退回完整选择器。
 		handle = null;
 	}
 	if (!interactive) return null;
@@ -155,9 +193,17 @@ export async function getBackupDirHandle(
 	return handle;
 }
 
-/** 主动让用户（重新）选择备份文件夹，并持久化句柄。 */
+/**
+ * 主动让用户（重新）选择备份文件夹，并持久化句柄。
+ * 已有持久化句柄但权限降级时，优先对旧句柄补授权 —— 用户只需在 Chromium 提示里
+ * 点一次「允许」（并可选「每次访问时都允许」从此不再询问），而不是重新选一遍文件夹。
+ */
 export async function chooseBackupDirectory(): Promise<FileSystemDirectoryHandle | null> {
 	if (!supportsFSA()) return null;
+	const persisted = await loadDirHandle();
+	if (persisted && (await ensurePermission(persisted, 'readwrite'))) {
+		return persisted;
+	}
 	try {
 		const picker = (window as unknown as {
 			showDirectoryPicker: (o?: {

@@ -16,11 +16,12 @@
 		chooseBackupDirectory,
 		deleteBackup,
 		downloadBundleFile,
-		getBackupDirHandle,
+		getBackupDirStatus,
 		listBackups,
 		createBackup as svcCreate,
 		pickBundleFile,
 		readBackup,
+		requestBackupDirRegrant,
 		supportsFSA,
 		type BackupBundle,
 		type BackupMeta
@@ -38,6 +39,8 @@
 	let backups = $state<BackupMeta[]>([]);
 	let loading = $state(false);
 	let dirReady = $state(false);
+	// 句柄存在但权限降回 prompt（WebView2 重启后的正常现象）→ 出「重新授权」提示条。
+	let needsGrant = $state(false);
 
 	// ---- 自动备份设置（读写 settingsStore，随备份包一起导出/恢复）----
 	let autoEnabled = $state(false);
@@ -97,8 +100,9 @@
 
 	async function init() {
 		if (!diskMode) return;
-		const handle = await getBackupDirHandle(false);
-		dirReady = !!handle;
+		const status = await getBackupDirStatus();
+		dirReady = status === 'granted';
+		needsGrant = status === 'needs-grant';
 		loadAutoSettings();
 		if (dirReady) await load();
 	}
@@ -111,10 +115,28 @@
 		const handle = await chooseBackupDirectory();
 		if (handle) {
 			dirReady = true;
+			needsGrant = false;
 			await load();
 			toast.success('Backup folder selected — future backups go straight to that directory');
 		} else {
 			toast.info('No folder selected, or permission was denied');
+		}
+	}
+
+	/**
+	 * 一键补授权：对已持久化的句柄再要一次权限（在按钮点击的手势里调用）。
+	 * Chromium ≥122 的三方提示里选「每次访问时都允许」→ 以后每次启动都不再询问。
+	 */
+	async function regrantFolder() {
+		const ok = await requestBackupDirRegrant();
+		if (ok) {
+			needsGrant = false;
+			dirReady = true;
+			await load();
+			toast.success('Backup folder re-granted — automatic backups are active again');
+		} else {
+			// 补授权失败（用户拒绝或提示被关）→ 退回完整选择器流程。
+			await chooseFolder();
 		}
 	}
 
@@ -254,6 +276,20 @@
 			Local disk hosting is unavailable in this browser (requires Chromium / WebView2 over a
 			secure https or localhost context). Use Import file below to restore from a backup bundle;
 			the desktop llama-desk build writes backups straight to disk (e.g. <code>D:\llama\backups\</code>) and manages them automatically.
+		</div>
+	{:else if needsGrant}
+		<div
+			class="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300"
+			data-probe="backup-needs-grant"
+		>
+			<span>
+				Backup folder needs re-authorization after the app restarted. Click Re-grant access and
+				choose “Allow on every visit” to never see this prompt again.
+			</span>
+			<Button onclick={regrantFolder} variant="outline" size="sm">
+				<FolderOpen class="h-4 w-4" />
+				Re-grant access
+			</Button>
 		</div>
 	{:else if !dirReady}
 		<div

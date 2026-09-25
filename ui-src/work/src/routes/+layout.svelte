@@ -33,6 +33,7 @@
 	} from '$lib/stores';
 	import { initStores } from '$lib/stores/init';
 	import { maybeAutoBackup } from '$lib/services/autoBackupService';
+	import { getBackupDirStatus, requestBackupDirRegrant } from '$lib/services/backupService';
 	import { ModeWatcher } from 'mode-watcher';
 	import { untrack } from 'svelte';
 	import { onMount } from 'svelte';
@@ -192,12 +193,37 @@
 		// 是否真的写备份由设置里的间隔节流，这里只负责"按时来看一眼"。
 		const autoBackupTimer = window.setInterval(() => void maybeAutoBackup(), 30 * 60 * 1000);
 		const autoBackupKick = window.setTimeout(() => void maybeAutoBackup(), 20_000);
+
+		// 备份目录权限补授权：WebView2 每次重启都会把 FSA 权限降回 prompt，自动备份
+		// 因此静默跳过，直到用户重新授权。这里在「第一次用户手势」里对持久化句柄
+		// 静默调 requestPermission —— 弹出的 Chromium 提示里选「每次访问时都允许」
+		// 即永久授权，之后启动再也不会问。没选过文件夹或权限仍有效时什么都不弹。
+		const regrantKick = () => {
+			window.removeEventListener('pointerdown', regrantKick, true);
+			window.removeEventListener('keydown', regrantKick, true);
+			void (async () => {
+				try {
+					if ((await getBackupDirStatus()) === 'needs-grant') {
+						const ok = await requestBackupDirRegrant();
+						// 补授权成功立刻补跑一次（否则最早要等 30 分钟定时器）
+						if (ok) void maybeAutoBackup();
+					}
+				} catch {
+					// 手势过期或提示被关闭 → 下次进设置页点「Re-grant access」补救
+				}
+			})();
+		};
+		window.addEventListener('pointerdown', regrantKick, true);
+		window.addEventListener('keydown', regrantKick, true);
+
 		const watchManagerEventsCleanup = watchManagerEvents();
 
 		return () => {
 			watchManagerEventsCleanup?.();
 			window.clearInterval(autoBackupTimer);
 			window.clearTimeout(autoBackupKick);
+			window.removeEventListener('pointerdown', regrantKick, true);
+			window.removeEventListener('keydown', regrantKick, true);
 		};
 	});
 

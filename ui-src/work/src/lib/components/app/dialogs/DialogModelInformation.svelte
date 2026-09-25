@@ -27,7 +27,6 @@
 	// in router mode use per-model props, otherwise use global props
 	let serverProps = $derived(isRouter && modelId ? routerModelProps : serverStore.props);
 
-	let modelName = $derived(modelId && firstModel ? firstModel.model : modelsStore.singleModelName);
 	let models = $derived(modelsStore.models);
 	let isLoadingModels = $derived(modelsStore.loading);
 
@@ -44,6 +43,8 @@
 
 		return models[0] ?? null;
 	});
+
+	let modelName = $derived(modelId && firstModel ? firstModel.model : modelsStore.singleModelName);
 
 	// Get modalities from modelStore using the model ID from the first model
 	let modalities = $derived.by(() => {

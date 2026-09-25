@@ -1342,6 +1342,9 @@
     // toast 与兜底异常文案（渲染成 toast 里的文本节点，走同一条匹配路径）
     'Backup folder selected — future backups go straight to that directory': '已选择备份文件夹，后续备份将直接写入该目录',
     'No folder selected, or permission was denied': '未选择文件夹或权限被拒绝',
+    'Backup folder needs re-authorization after the app restarted. Click Re-grant access and choose “Allow on every visit” to never see this prompt again.': '应用重启后备份文件夹需要重新授权。点击「重新授权」并在提示中选择「每次访问时都允许」，之后就不会再询问',
+    'Re-grant access': '重新授权',
+    'Backup folder re-granted — automatic backups are active again': '备份文件夹已重新授权，自动备份恢复工作',
     'Backup created and saved to local disk': '备份已创建并保存到本地磁盘',
     'Failed to create the backup': '创建备份失败',
     'Restore complete (presets merged and de-duplicated). Reload the page to apply the settings.': '恢复完成（方案已合并去重），建议刷新页面以应用设置',
