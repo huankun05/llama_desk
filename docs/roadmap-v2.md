@@ -1211,3 +1211,23 @@ webui/manager_pkg/
   「仓库还没有发布版本」分支。
 - 验收：cargo test 9/9（+parse_ver）；svelte-check 0/0；probe_about 5/5 + settings
   12/12；CJK 0 处；dict 待补 0；overlay v116。
+
+**更新进度可见化 ✅（9-25 晚，用户反馈「更新半天没动静像卡死」）**：
+- 诊断：实测用户机器 `%TEMP%\llama-desk-update`——main.zip 243MB 已下完、cudart.zip
+  以 ~2.3MB/s 下载中，**更新没卡**，纯问题是全程无反馈（两包合计 ~550MB）。
+- 根治：`download()` 从 Invoke-WebRequest 一次性阻塞改为 **HttpWebRequest 流式读取**
+  （顺带甩掉 IWR 进度条渲染开销），每 ~800ms 把「已读 总字节」写进
+  `%TEMP%\llama-desk-update\dl.progress`；旁边轮询线程每秒读文件换成
+  「正在下载 llama.cpp 主包 42%（123 / 293 MB）」经 progress 回调推送。
+- **阶段消息全覆盖**：正在备份当前版本 → 查询最新发布 → 连接下载源 → 下载主包
+  （实时百分比）→ 校验 SHA256 → 下载 CUDA 运行时（实时百分比）→ 校验 → 解压替换
+  bin → 冒烟测试 → 停止本地服务 → 重启服务 → 等待就绪。回调类型
+  `ProgressFn = Arc<dyn Fn(&str) + Send + Sync>`（轮询线程要求 'static）；
+  AboutTab 更新横幅改渲染动态 `updateMessage`（旧固定文案删掉）。
+- 完整性校验升级：流式下载后除「文件非空」外，新增**已读字节数 == ContentLength**
+  比对（脚本内 throw），拦截传输截断。
+- 新增 `docs/release-guide.md`：应用壳发版步骤（Cargo.toml 与 tauri.conf.json 版本
+  双处一致 / tag `vX.Y.Z` 规范 / 附件命名 / 检查逻辑硬性要求表 / 为什么替换 exe 不丢数据）。
+- 脚本沙箱实测：HttpWebRequest 流式下载 + 进度文件写入 OK（529/529 字节）。
+- 验收：cargo test 9/9；svelte-check 0/0；probe_about 5/5 + settings 12/12；
+  CJK 0 处；dict 待补 0（清理一个重复键 + 一个失效长词条）；overlay v117。

@@ -21,12 +21,19 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::config::AppConfig;
 use crate::supervisor::{Supervisor, CREATE_NO_WINDOW};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+
+/// 各阶段进度回调：install_latest / manual_update 在关键步骤调用，
+/// 参数是直接给用户看的消息（中文 —— 动态插值走不了 overlay 词典）。
+/// Arc 包装是为了让下载轮询线程也能持有它（线程要求 'static）。
+pub type ProgressFn = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 /// 主路：发布 Atom 馈源（普通网页，无 API 限流）
 const FEED_URL: &str = "https://github.com/ggml-org/llama.cpp/releases.atom";
@@ -324,32 +331,102 @@ try {{
     Ok(out)
 }
 
-/// 下载文件到本地（PowerShell Invoke-WebRequest，600s 超时）。
-/// 完成后校验文件非空（拦截「下载到一半被截断」的情况）。
-fn download(url: &str, dest: &Path) -> Result<(), String> {
+/// 下载文件到本地（PowerShell HttpWebRequest **流式**读取，600s 超时）。
+/// 旧的 Invoke-WebRequest 是一次性阻塞调用，中途毫无反馈 —— 而 llama.cpp 的
+/// CUDA 包合计约 550MB，慢连接下几分钟到几十分钟什么都不显示像极了卡死。
+/// 现在脚本每 ~800ms 把「已读字节 总字节」写进进度文件，旁边一个轮询线程
+/// 每秒读一次换成「正在下载 xx%（x/y MB）」消息经 progress 回调推给前端。
+/// 完成后校验文件非空 + 大小与 ContentLength 一致（拦截传输截断）。
+fn download(url: &str, dest: &Path, label: &str, progress: ProgressFn) -> Result<(), String> {    let tmp_dir = dest
+        .parent()
+        .ok_or_else(|| "下载目标没有父目录".to_string())?
+        .to_path_buf();
+    let pf = tmp_dir.join("dl.progress");
+    let _ = std::fs::remove_file(&pf);
+    let pf_s = pf.to_string_lossy().replace('\\', "/");
     let dest_s = dest.to_string_lossy().replace('\\', "/");
     let script = format!(
         r#"
 $ErrorActionPreference = 'Stop'
 try {{
-  Invoke-WebRequest -Uri '{url}' -OutFile '{dest_s}' -UserAgent 'llama-desk' -TimeoutSec 600 -UseBasicParsing
+  $req = [System.Net.WebRequest]::Create('{url}')
+  $req.UserAgent = 'llama-desk'
+  $req.Timeout = 600000
+  $req.ReadWriteTimeout = 120000
+  $resp = $req.GetResponse()
+  $total = $resp.ContentLength
+  $in = $resp.GetResponseStream()
+  $out = [System.IO.File]::Create('{dest_s}')
+  $buf = New-Object byte[] 4194304
+  $read = [long]0
+  $last = [DateTime]::Now
+  while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {{
+    $out.Write($buf, 0, $n)
+    $read += $n
+    if ((([DateTime]::Now) - $last).TotalMilliseconds -ge 800) {{
+      $last = [DateTime]::Now
+      "$read $total" | Set-Content -LiteralPath '{pf_s}' -Force
+    }}
+  }}
+  "$read $total" | Set-Content -LiteralPath '{pf_s}' -Force
+  $out.Close(); $in.Close(); $resp.Close()
+  if ($total -gt 0 -and $read -ne $total) {{ throw "download incomplete: $read / $total" }}
   "OK"
 }} catch {{
   "ERROR: $($_.Exception.Message)"
 }}
 "#
     );
-    let out = ps_capture(&script)?;
-    if out.trim().starts_with("ERROR:") {
-        return Err(format!("下载失败 {url}：{}", out.trim()));
+
+    // 轮询线程：每秒读进度文件换成人类可读消息；下载结束（成功或失败）置 stop 收掉
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop2 = stop.clone();
+        let pf2 = pf.clone();
+        let label2 = label.to_string();
+        let progress2 = progress.clone();
+        std::thread::spawn(move || {
+            while !stop2.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+                // PowerShell 正在重写这个文件时读取可能撞锁，失败就等下一轮
+                if let Ok(txt) = std::fs::read_to_string(&pf2) {
+                    let mut parts = txt.trim().split_whitespace();
+                    let (Some(read), Some(total)) = (parts.next(), parts.next()) else {
+                        continue;
+                    };
+                    let (Ok(read), Ok(total)) = (read.parse::<u64>(), total.parse::<u64>()) else {
+                        continue;
+                    };
+                    if total > 0 {
+                        let pct = read * 100 / total;
+                        progress2(&format!(
+                            "{label2} {pct}%（{} / {} MB）",
+                            read / 1_048_576,
+                            total / 1_048_576
+                        ));
+                    }
+                }
+            }
+        });
     }
-    if !dest.is_file() {
-        return Err(format!("下载完成但文件缺失：{}", dest.display()));
-    }
-    if std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0) == 0 {
-        return Err(format!("下载完成但文件为空（可能传输被截断）：{}", dest.display()));
-    }
-    Ok(())
+
+    let result = (|| -> Result<(), String> {
+        let out = ps_capture(&script)?;
+        if out.trim().starts_with("ERROR:") {
+            return Err(format!("下载失败 {url}：{}", out.trim()));
+        }
+        if !dest.is_file() {
+            return Err(format!("下载完成但文件缺失：{}", dest.display()));
+        }
+        if std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0) == 0 {
+            return Err(format!("下载完成但文件为空（可能传输被截断）：{}", dest.display()));
+        }
+        Ok(())
+    })();
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = std::fs::remove_file(&pf);
+    result
 }
 
 /// 解压 zip 到目标目录（PowerShell Expand-Archive -Force 覆盖）。
@@ -480,7 +557,8 @@ fn verify_after_install(_cfg: &AppConfig, bin_dir: &Path) -> Result<u32, String>
 /// 下载并解压最新 llama.cpp 到 bin/（假设调用方已停掉服务）。
 /// 流程：备份当前 bin/ → 下载(含 SHA256) → 解压覆盖 → 冒烟测试 →
 /// 成功则保留(并清理旧备份)，失败则自动回滚到备份。
-pub fn install_latest(cfg: &AppConfig) -> Result<String, String> {
+/// 每个阶段经 progress 回调上报（前端「关于应用」横幅实时显示）。
+pub fn install_latest(cfg: &AppConfig, progress: ProgressFn) -> Result<String, String> {
     let bin_dir: PathBuf = Path::new(&cfg.llama_server)
         .parent()
         .ok_or_else(|| "无法确定 bin 目录（llama_server 路径异常）".to_string())?
@@ -489,10 +567,13 @@ pub fn install_latest(cfg: &AppConfig) -> Result<String, String> {
     let before = current_build(cfg);
 
     // 1) 先备份当前 bin/（放在 bin 的同级目录，避免被解压覆盖）
+    progress("正在备份当前版本…");
     let backup = backup_bin(&bin_dir)?;
     eprintln!("[llama-desk] 已备份当前 llama.cpp 到 {}", backup.display());
+    progress("备份完成（旧版本可回滚，最多保留 3 份）");
 
     // 2) 取最新发布
+    progress("正在查询 GitHub 最新发布…");
     let latest = fetch_latest()?;
     if latest.main_url.is_empty() {
         let _ = restore_backup(&bin_dir, &backup);
@@ -507,16 +588,30 @@ pub fn install_latest(cfg: &AppConfig) -> Result<String, String> {
     std::fs::create_dir_all(&tmp).map_err(|e| format!("无法创建临时目录：{e}"))?;
     let main_zip = tmp.join("main.zip");
     let cudart_zip = tmp.join("cudart.zip");
-    download(&latest.main_url, &main_zip)?;
+    progress("正在连接下载源…");
+    download(
+        &latest.main_url,
+        &main_zip,
+        "正在下载 llama.cpp 主包",
+        progress.clone(),
+    )?;
+    progress("主包下载完成，正在校验 SHA256…");
     let main_hash = sha256_file(&main_zip).unwrap_or_default();
     eprintln!("[llama-desk] 主包 SHA256: {main_hash}");
     if !latest.cudart_url.is_empty() {
-        download(&latest.cudart_url, &cudart_zip)?;
+        download(
+            &latest.cudart_url,
+            &cudart_zip,
+            "正在下载 CUDA 运行时",
+            progress.clone(),
+        )?;
+        progress("CUDA 运行时下载完成，正在校验 SHA256…");
         let cudart_hash = sha256_file(&cudart_zip).unwrap_or_default();
         eprintln!("[llama-desk] cudart SHA256: {cudart_hash}");
     }
 
     // 4) 解压覆盖 bin/
+    progress("校验完成，正在解压替换 bin 目录…");
     extract(&main_zip, &bin_dir)?;
     if !latest.cudart_url.is_empty() && cudart_zip.is_file() {
         extract(&cudart_zip, &bin_dir)?;
@@ -524,6 +619,7 @@ pub fn install_latest(cfg: &AppConfig) -> Result<String, String> {
     let _ = std::fs::remove_dir_all(&tmp);
 
     // 5) 冒烟测试：新二进制必须能跑出版本号，且版本号应高于旧版
+    progress("正在做冒烟测试（运行新版 llama-server --version）…");
     match verify_after_install(cfg, &bin_dir) {
         Ok(new_build) => {
             if let Some(b) = before {
@@ -741,18 +837,22 @@ pub fn check_shell_status() -> serde_json::Value {
 
 /// 手动更新：停掉本应用托管的实例 → 替换 → 重启；
 /// 若服务由外部进程占用则只替换二进制并提示手动重启。
-pub fn manual_update(cfg: &AppConfig, sup: &Supervisor) -> String {
+/// 进度经 progress 回调上报。
+pub fn manual_update(cfg: &AppConfig, sup: &Supervisor, progress: ProgressFn) -> String {
     let owned = sup.llama_owned_alive();
     let port_open = sup.llama_port_open();
     if owned {
+        progress("正在停止本地服务（替换二进制前必须先停）…");
         sup.kill_llama();
         std::thread::sleep(std::time::Duration::from_millis(800));
     }
-    match install_latest(cfg) {
+    match install_latest(cfg, progress.clone()) {
         Ok(msg) => {
             if owned {
+                progress("正在重启本地服务…");
                 match sup.spawn_llama() {
                     Ok(pid) => {
+                        progress("等待服务就绪…");
                         sup.wait_port(cfg.llama_port, std::time::Duration::from_secs(180));
                         format!("{msg}；已重启 llama-server (PID {pid})")
                     }

@@ -319,11 +319,18 @@
 
 				{#if updating}
 					<div
-						class="flex items-center gap-2 rounded-md border border-primary/40 bg-primary/10 p-3 text-sm text-primary"
+						class="flex items-start gap-2 rounded-md border border-primary/40 bg-primary/10 p-3 text-sm text-primary"
 						data-probe="about-update-banner"
 					>
-						<LoaderCircle class="h-4 w-4 animate-spin" />
-						<span>Updating llama.cpp — the local service restarts when it finishes. You can keep using the app; a system notification will tell you when it is done.</span>
+						<LoaderCircle class="mt-0.5 h-4 w-4 shrink-0 animate-spin" />
+						<div class="min-w-0">
+							<!-- 后端各阶段实时推送：备份/查询/下载百分比/校验/解压/冒烟/重启服务 -->
+							<span data-probe="about-update-progress">{updateMessage || 'Updating llama.cpp…'}</span>
+							<p class="text-xs text-primary/70">
+								You can keep using the app; a system notification will tell you when it is
+								done.
+							</p>
+						</div>
 					</div>
 				{/if}
 			</div>

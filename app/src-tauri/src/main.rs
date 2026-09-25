@@ -180,8 +180,12 @@ async fn app_update_now(app: AppHandle) -> Result<String, String> {
             "llama-desk",
             "正在更新 llama.cpp（自动备份旧版本，完成后通知你）",
         );
-        emit_update(&app2, "running", "Updating llama.cpp…");
-        let msg = updater::manual_update(&cfg, &sup);
+        emit_update(&app2, "running", "正在更新 llama.cpp…");
+        // 各阶段消息经 progress 回调实时推给前端横幅（含下载百分比）
+        let app3 = app2.clone();
+        let progress: updater::ProgressFn =
+            std::sync::Arc::new(move |msg: &str| emit_update(&app3, "running", msg));
+        let msg = updater::manual_update(&cfg, &sup, progress);
         trace(&cfg.log_dir, &format!("手动更新：{msg}"));
         eprintln!("[llama-desk] 手动更新：{msg}");
         let ok = !msg.starts_with("更新失败");
