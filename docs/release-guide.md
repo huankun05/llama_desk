@@ -6,11 +6,13 @@
 
 ## 发版步骤
 
-1. **升版本号**（两处必须一致）：
+1. **整理 CHANGELOG**：把根目录 `CHANGELOG.md` 里 `[Unreleased]` 节的内容整理为新的 `[vX.Y.Z] - 日期` 小节（写法约定见该文件头部），清空 Unreleased；Release 说明可直接复用这段。
+2. **升版本号**（两处必须一致）：
    - `app/src-tauri/Cargo.toml` 的 `version`（编译进 exe 的 `CARGO_PKG_VERSION`，检查更新拿它做对比）；
    - `app/src-tauri/tauri.conf.json` 的 `version`（设置页显示的版本）。
-2. **构建**：`app\build.bat`（release + cargo），产物在 `app\src-tauri\target\release\llama-desk.exe`。
-3. **打 tag 并发布 Release**：
+   版本号规则：不兼容改动 / 大功能 → 升次版本号（1.1.0）；修 bug / 小改进 → 升修订号（1.0.1）。
+3. **构建**：`app\build.bat`（release + cargo），产物在 `app\src-tauri\target\release\llama-desk.exe`。
+4. **打 tag 并发布 Release**：
    - tag 名必须形如 `v1.0.1`（`v` 前缀 + 语义化版本 `X.Y.Z`，检查逻辑能容忍大写 `V` 与缺段如 `v1.2`）；
    - 在 GitHub 网页 Releases → Draft a new release → 填 tag → 附件上传 `llama-desk.exe`；
    - Release 说明建议写：更新了什么、是否需要重建/迁移、已知问题。
