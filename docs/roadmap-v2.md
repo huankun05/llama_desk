@@ -1231,3 +1231,18 @@ webui/manager_pkg/
 - 脚本沙箱实测：HttpWebRequest 流式下载 + 进度文件写入 OK（529/529 字节）。
 - 验收：cargo test 9/9；svelte-check 0/0；probe_about 5/5 + settings 12/12；
   CJK 0 处；dict 待补 0（清理一个重复键 + 一个失效长词条）；overlay v117。
+
+**「更新完还提示新版本」修复 ✅（9-25 晚，用户实测反馈）**：
+- **排查结论**：更新本身完全成功——bin/llama-server.exe 实测已是
+  `0.5.0-dev (build 11178, commit f9af9be21)`，%TEMP%\llama-desk-update 已清空。
+  界面仍说「发现新版本」是**提示状态未清理**的 bug。
+- **根因**：启动期自动检查把「有新版本」写进 `STARTUP_NOTICE` 静态量后，
+  当次会话内更新成功也不清除 → `app_info.startup_update` 永远返回过期提示
+  → About 页琥珀横幅一直挂着「build 10853 → b11178」。
+- **修复（双保险）**：① `startup_notice_json(cfg)` 自愈——读时比对
+  `current_build(cfg) >= n.build` 则作废并清掉静态量（外部手动换 bin 也能自愈）；
+  ② `app_update_now` 成功路径主动 `*STARTUP_NOTICE = None`；③ 前端 AboutTab
+  收到 `app-update` done 事件后立即重拉 app_info，横幅当场消失（不用重开页面）。
+- 验收：cargo test 9/9；svelte-check 0/0；probe_about 5/5 + settings 12/12；
+  CJK 0 处；dict 待补 0；overlay v118。⚠️ 需用户重建 exe 后验证
+  （本轮更新已把 llama.cpp 升到 b11178，界面横幅消失可先重开设置页确认）。

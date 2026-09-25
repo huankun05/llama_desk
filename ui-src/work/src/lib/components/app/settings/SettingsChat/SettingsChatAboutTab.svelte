@@ -63,6 +63,14 @@
 						action: { label: 'Restart now', onClick: () => void restartApp() },
 						duration: 15000
 					});
+					// 立即刷新 app_info：启动期「发现新版本」提示已被外壳作废，
+					// 不刷新的话琥珀横幅会一直挂到页面重开（2026-09-25 实测踩坑）
+					void getAppInfo()
+						.then((v) => {
+							info = v;
+							autoEnabled = v?.auto_update ?? false;
+						})
+						.catch(() => {});
 				} else {
 					toast.error(e.message);
 				}

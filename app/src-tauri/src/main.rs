@@ -87,8 +87,19 @@ fn emit_update(app: &AppHandle, stage: &str, message: &str) {
 /// 启动期自动检查发现的「有新版本」转成 app_info 里的 JSON（无则 null）。
 /// message 由后端拼好中文（含版本对比），前端 toast 直接显示 —— 动态插值字符串
 /// 没法走 overlay 词典（整文本节点精确匹配），后端拼好是既有的通行做法。
-fn startup_notice_json() -> serde_json::Value {
-    let g = STARTUP_NOTICE.lock().unwrap();
+///
+/// 自愈（2026-09-25 用户实测踩坑）：提示在启动时写入后，若用户当次会话里
+/// 完成了更新（或外部换了 bin），本地构建号已不低于提示的版本 —— 此时提示
+/// 已过期，读到这里就作废并顺手清掉，否则横幅会永远挂着「发现新版本」。
+fn startup_notice_json(cfg: &AppConfig) -> serde_json::Value {
+    let mut g = STARTUP_NOTICE.lock().unwrap();
+    let stale = match g.as_ref() {
+        Some(n) => updater::current_build(cfg).is_some_and(|cur| cur >= n.build),
+        None => false,
+    };
+    if stale {
+        *g = None;
+    }
     match g.as_ref() {
         Some(n) => {
             let date = n.date.clone().unwrap_or_default();
@@ -140,8 +151,9 @@ async fn app_info(app: AppHandle) -> Result<serde_json::Value, String> {
                 .join("llama-desk-update")
                 .to_string_lossy(),
             "log_dir": cfg.log_dir,
-            // 启动期自动检查（仅提示不安装）发现的新版本；无则 null
-            "startup_update": startup_notice_json(),
+            // 启动期自动检查（仅提示不安装）发现的新版本；无则 null。
+            // 传入 cfg 做自愈判断：本地已更新到提示版本时不返回过期提示。
+            "startup_update": startup_notice_json(&cfg),
         })
     })
     .await
@@ -189,6 +201,11 @@ async fn app_update_now(app: AppHandle) -> Result<String, String> {
         trace(&cfg.log_dir, &format!("手动更新：{msg}"));
         eprintln!("[llama-desk] 手动更新：{msg}");
         let ok = !msg.starts_with("更新失败");
+        if ok {
+            // 更新成功：启动期「发现新版本」提示已过时，立即作废
+            // （app_info 里的自愈判断也会兜底，这里主动清是为了语义干净）
+            *STARTUP_NOTICE.lock().unwrap() = None;
+        }
         notify(
             &app2,
             if ok { "llama.cpp 更新完成" } else { "llama.cpp 更新失败" },
