@@ -1024,4 +1024,53 @@ webui/manager_pkg/
 - 前端 `EnvCheckBanner`：环境不完整时顶部挂可关闭指引条（缺失路径原样展示），全绿或 manager 不可达时隐藏
 - tests 38/38；`probe_env_check.mjs` 7/7（拦截注入坏环境 + 真环境无条）
 
-**第 2 级（未拍板）**：无 NVIDIA 时的降级路径（隐藏 GPU 面板 / fit 提示无法预演但允许直接加载）、跨平台进程管理替代 taskkill。AMD/Intel 完整支持与 macOS/Linux 移植成本高，暂不建议。
+**第 2 级 ✅（2026-09-25）——无 NVIDIA 降级 + 跨平台进程管理**：
+- **跨平台进程工具 `manager_pkg/procinfo.py`（新）**：把散在 instances.py / metrics.py 的
+  Windows 绑定收敛到一处 —— `pids_on_port`（Windows: netstat 逐行等价；POSIX: lsof →
+  ss -ltnp 正则 → 都没有返回空集，功能受限但绝不抛）、`image_name`（Windows: tasklist
+  等价；POSIX: /proc/<pid>/comm → ps -o comm=）、`terminate_pid`（taskkill /F vs
+  SIGKILL，错误静默）。instances/metrics 只改调用面，行为不变。
+  ⚠️POSIX 分支在本沙箱（Windows）只能 mock 单测，未在真实 Linux/macOS 跑过——
+  首次有跨平台用户时先跑 `tests/test_procinfo.py`。
+  📌 mock 单测当场抓到一个真 bug：Windows 的 Python `signal` 模块没有 `SIGKILL`
+  属性，引用即炸 → `getattr(signal, "SIGKILL", 9)` 兜底。
+- **无 NVIDIA 时的降级盘点**（多数已天然成立，本轮补齐缺口）：
+  - `EnvCheckBanner` 琥珀色提示（第 1 级已做）✅
+  - 预算条 / 显存徽章：`vram_total_gb` 缺失 → 估算返回 null → 区块自动隐藏 ✅（既有空值兜底）
+  - 「fit 无法预演但允许直接加载」：`resolve_launch` 的 `plan["ok"]=False` 分支本就
+    落到「预演不可用，改由 llama.cpp 启动时自行拟合」，不阻塞启动 ✅（无需改）
+  - **缺口补齐**：GPU 健康分节的 verdict `unknown` 级（无显卡永远 no samples）原来
+    落进 else 显示「Idle」灰色徽章，误导成空转 → 现单独渲染「No data」徽章。
+- **验收**：tests 38→**48/48**（新增 `test_procinfo.py` 10 例：lsof/ss/comm/ps 解析、
+  工具缺失降级、SIGKILL 静默、Windows netstat/tasklist 契约回归）；manager 重启后
+  `/api/ping`(stale:false)、`/api/models`、`/api/env-check` 全部正常。
+
+**工程卫生·内存结论 ✅（2026-09-25，H3 第 5 条关闭）**：
+- 新工具 `tools/diag/mem_profile.py`：①内部画像——按真实启动顺序初始化，四里程碑
+  （bare / import / scan / metrics）各打 RSS（ctypes GetProcessMemoryInfo）+ tracemalloc
+  堆 top15；②外部体检 `--pid <pid>`——工作集 / 私有提交 / 句柄数。
+- **实测推翻旧观察**：Python 堆全程仅 4.5 MiB；初始化完 RSS ≈ 55 MiB；真机跑了
+  49 分钟、几千次 nvidia-smi 轮询的 manager：工作集 36.9 MiB、私有提交 21.7 MiB、
+  句柄 303（稳定）——**无泄漏、无 738 MB**。旧记录（0.7 GB 常驻、差值 325 MB 未定位）
+  无法复现，作废关闭。RSS≈堆的事实也解释了为什么之前排查不到 Python 侧元凶。
+
+**聊天自动备份 ✅（2026-09-25，用户拍板「做成开关」）**：
+- 设置 3 键（`autoBackupEnabled` / `autoBackupIntervalHours`=24 / `autoBackupKeepCount`=7，
+  进 SETTINGS_REGISTRY 拿默认值与导出兜底，`standaloneField:false` 不进通用表单）。
+- 新服务 `src/lib/services/autoBackupService.ts`：`maybeAutoBackup()` = 读设置 →
+  **非交互**取目录句柄（权限降级为 prompt 时静默跳过，绝不弹窗）→ 按 listBackups 里
+  最新一份 auto-backup 的时间节流 → 全量 bundle（方案+覆盖+设置+全部对话）写盘 →
+  轮转只删 `name==='auto-backup'` 的旧份（**手动备份永不触碰**）。任何失败静默留痕。
+- 触发：`+layout.svelte` onMount 后 20s 首查 + 30min 定时；与 onCleanup 一起清理。
+- UI：设置 → 备份管理 顶部新「Auto backup」组（开关 / 间隔 / 保留份数 / 状态行，
+  `data-probe="auto-backup-*"`），上次自动备份时间展示。
+- `backupService` 的 create/deleteBackup 加 `{interactive}` 选项（手动路径默认不变）。
+- 顺手修：`settings.constants.ts` 里 Backup 分节 title 硬编码中文 `'备份管理'` →
+  英文源码 `'Backup'` + overlay DICT 词条（CJK 审计盲区：工具只扫 .svelte）。
+- 验收：svelte-check 新代码 0 错（既有 16 个隐式 any 是上轮遗留、与本轮无关）；
+  vite build ✅ → 部署 `overlay.js?v=106`；轮转纯函数 `pickAutoBackupsToPrune`
+  vitest 5/5（`tests/unit/auto-backup.test.ts`）；CJK 审计 0 处；dict 审计 0 缺词。
+  ⚠️ 真机体验路径：设置 → 备份管理 → 选文件夹 → 开开关 →（到点后）备份列表出现
+  `auto-backup_*`。
+
+**第 2 级 ✅ 已完成（9-25，见上方收尾记录）**：跨平台进程管理（`procinfo.py`）+ 无 NVIDIA 降级盘点（unknown verdict、既有空值兜底确认）。AMD/Intel 完整支持与 macOS/Linux 移植成本高，仍不建议。

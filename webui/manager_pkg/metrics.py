@@ -8,7 +8,9 @@ from .state import (WEBUI_DIR, MODEL_DIRS, instances, inst_lock,
                     _GPU_HIST, _GPU_HIST_LOCK, _GPU_HIST_MAX, _GPU_SAMPLER_INTERVAL,
                     _GPU_LIMIT, _GPU_LIMIT_DEFAULT, _GPU_REASON_FIELD,
                     _run, _run_capture, _decode_bytes)
-from .instances import stop_instance, refresh_status, _image_name
+from .instances import stop_instance, refresh_status
+from . import procinfo
+from .procinfo import image_name as _image_name
 
 # ---------- 系统资源监控（GPU/CPU/RAM，免依赖）----------
 _sys_cache = {"data": None, "ts": 0.0}
@@ -436,7 +438,7 @@ def kill_llama_pid(pid):
     img = _image_name(pid) or ""
     if "llama-server" not in img.lower():
         return False, (img or "(unknown)")
-    _run(["taskkill", "/F", "/PID", str(pid)], timeout=8.0)
+    procinfo.terminate_pid(pid)
     with inst_lock:
         for inst in instances.values():
             if inst.get("pid") == pid and inst.get("status") != "stopped":

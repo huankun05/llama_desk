@@ -4,6 +4,7 @@ import os, sys, re, json, time, uuid, subprocess, threading
 import urllib.request
 from urllib.parse import urlparse, parse_qs
 from . import state
+from . import procinfo
 from .state import (WEBUI_DIR, LLAMA_SERVER, instances, inst_lock,
                     events_log, events_lock, _run, _decode_bytes)
 from .gguf import find_mmproj, guess_quant, sweep_parked_aliases
@@ -15,34 +16,16 @@ from .fit import (resolve_launch, fit_mem, fit_cache_for, AUTO_KV_LADDER,
 # 或手工 .bat 拉起，这类进程不在下面的 instances 表里。要让 UI 能一键换模型，
 # 必须能在启动新模型前把占用目标端口的旧 llama-server 结束掉。
 # 只结束 llama-server.exe，绝不误杀用户其它程序。
+#
+# 查端口/查映像名/杀进程的平台差异已收敛到 procinfo.py（开源化第 2 级）；
+# 这里的调用面保持不变。
 
 def _pids_on_port(port):
-    """返回 LISTENING 在指定 TCP 端口上的 pid 集合（netstat -ano）。"""
-    out = _run(["netstat", "-ano", "-p", "TCP"], timeout=4.0) or ""
-    pids = set()
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) < 5:
-            continue
-        local, state, pid = parts[1], parts[3], parts[4]
-        if state.upper() != "LISTENING":
-            continue
-        if local.rsplit(":", 1)[-1] != str(port):
-            continue
-        try:
-            pids.add(int(pid))
-        except ValueError:
-            pass
-    return pids
+    return procinfo.pids_on_port(port)
 
 
 def _image_name(pid):
-    """用 tasklist 查进程映像名（如 llama-server.exe）；查不到返回空串。"""
-    out = _run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"], timeout=4.0) or ""
-    line = out.strip().splitlines()[0].strip() if out.strip() else ""
-    if line.startswith('"'):
-        return line.split('"')[1]
-    return line.split(",")[0].strip() if line else ""
+    return procinfo.image_name(pid)
 
 
 def free_port(port, only_llama=True):
@@ -56,7 +39,7 @@ def free_port(port, only_llama=True):
         img = _image_name(pid)
         if only_llama and "llama-server" not in img.lower():
             continue
-        _run(["taskkill", "/F", "/PID", str(pid)], timeout=6.0)
+        procinfo.terminate_pid(pid)
         # 顺手把 instances 表里指向这个 pid 的记录标成已停止
         with inst_lock:
             for inst in instances.values():
