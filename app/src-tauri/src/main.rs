@@ -83,11 +83,16 @@ async fn app_info(app: AppHandle) -> Result<serde_json::Value, String> {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_default();
+        let li = updater::local_info(&cfg);
         serde_json::json!({
             // 外壳自身版本（tauri.conf.json 的 version）
             "app_version": env!("CARGO_PKG_VERSION"),
             // llama.cpp 构建号（跑 llama-server --version 解析；读不到为 null）
-            "llama_build": updater::current_build(&cfg),
+            "llama_build": li.build,
+            // 完整版本行（如 "0.4.0-dev (build 10853, commit 9dcf84e5a)"；读不到为 null）
+            "llama_version": li.version_line,
+            // llama-server.exe 的文件修改时间（≈ 安装日期）；版本行解析失败时 UI 用它兜底
+            "llama_installed_at": updater::exe_modified_date(&cfg),
             "auto_update": cfg.auto_update_llama_cpp,
             "bin_dir": bin_dir.to_string_lossy(),
             // 更新备份目录：bin 同级的 llamacpp_backup_<时间戳>/（最多留 3 份）
@@ -108,8 +113,10 @@ async fn app_info(app: AppHandle) -> Result<serde_json::Value, String> {
 }
 
 #[tauri::command]
-async fn app_check_update(app: AppHandle) -> Result<String, String> {
+async fn app_check_update(app: AppHandle) -> Result<serde_json::Value, String> {
     let cfg = app.state::<AppConfig>().inner().clone();
+    // 返回结构化 JSON：{ ok, message, local_build, local_version, installed_at,
+    //   up_to_date, latest_tag, latest_date }；网络失败时 ok=false 但 message 给出原因。
     tauri::async_runtime::spawn_blocking(move || updater::check_status(&cfg))
         .await
         .map_err(|e| format!("检查更新失败：{e}"))
@@ -375,7 +382,11 @@ fn main() {
         .run(|app, event| {
             // 退出时收拾自己拉起来的进程，别让 llama-server 变成孤儿占显存
             if let RunEvent::Exit = event {
-                app.state::<Supervisor>().stop_owned();
+                let sup = app.state::<Supervisor>();
+                sup.stop_owned();
+                // 兜底：清理「启动时端口已被占、因而没被托管」的残留服务
+                // （上次异常退出留下的 manager/llama-server 等，端口+镜像名双校验防误杀）
+                sup.stop_external_on_ports();
             }
         });
 }

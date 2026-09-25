@@ -253,6 +253,89 @@ impl Supervisor {
     pub fn llama_owned_alive(&self) -> bool {
         Self::child_alive(&self.inner.llama)
     }
+
+    /// 退出兜底：清理占用本应用端口的**残留**服务进程。
+    ///
+    /// 为什么需要它：boot() 发现端口已被占用时会「跳过托管」（不 spawn、不持有 Child），
+    /// 这类进程（上次异常退出留下的 manager/llama-server、用户手动起的实例）不属于
+    /// stop_owned() 的管辖范围 —— 应用正常退出后它们就变成孤儿，继续占端口/显存。
+    /// 用户明确要求「关闭应用时所有服务一起退出」，故在 RunEvent::Exit 里调用本方法。
+    ///
+    /// 安全边界：只杀「端口吻合 + 进程镜像吻合」的进程 ——
+    ///   * llama 端口（默认 8080）只杀镜像名含 `llama-server` 的；
+    ///   * manager 端口（默认 8090）只杀镜像名含 `python` 的（manager.py）。
+    /// 别的服务即使恰好占了这两个端口也不会被误伤。
+    pub fn stop_external_on_ports(&self) {
+        self.kill_external_on(self.inner.cfg.llama_port, "llama-server");
+        self.kill_external_on(self.inner.cfg.manager_port, "python");
+    }
+
+    fn kill_external_on(&self, port: u16, image_hint: &str) {
+        for pid in pids_listening_on(port) {
+            let image = image_name_of(pid).unwrap_or_default();
+            if image.to_ascii_lowercase().contains(image_hint) {
+                eprintln!(
+                    "[llama-desk] 退出清理：:{} 上的残留进程 {} (PID {pid})",
+                    port, image
+                );
+                let _ = Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/F", "/T"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+            }
+        }
+    }
+}
+
+/// 找出监听在 `port` 上的进程 PID（netstat -ano 解析；netstat 输出基本是 ASCII，lossy 安全）。
+fn pids_listening_on(port: u16) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Ok(o) = Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    else {
+        return out;
+    };
+    let text = String::from_utf8_lossy(&o.stdout);
+    let port_s = port.to_string();
+    for line in text.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // TCP  127.0.0.1:8080  0.0.0.0:0  LISTENING  1234
+        if cols.len() >= 5
+            && cols[3].eq_ignore_ascii_case("LISTENING")
+            && cols[1].rsplit(':').next() == Some(port_s.as_str())
+        {
+            if let Ok(pid) = cols[4].parse::<u32>() {
+                if !out.contains(&pid) {
+                    out.push(pid);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 读某 PID 的进程镜像名（tasklist CSV 输出第一列）。
+fn image_name_of(pid: u32) -> Option<String> {
+    let o = Command::new("tasklist")
+        .args([
+            "/FI",
+            &format!("PID eq {pid}"),
+            "/FO",
+            "CSV",
+            "/NH",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&o.stdout);
+    let first = text.lines().next()?.trim();
+    // 查无此进程时输出本地化的提示行（"信息: ..."），不是 CSV
+    if !first.starts_with('"') {
+        return None;
+    }
+    Some(first.trim_start_matches('"').split('"').next()?.to_string())
 }
 
 /// 用系统默认方式打开 URL（不引入 shell 插件）

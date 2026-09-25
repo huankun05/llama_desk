@@ -9,7 +9,7 @@
  * （{ stage: 'running' | 'done' | 'error', message }），onUpdateEvent 订阅它。
  */
 
-import type { AppInfo, ShellUpdateEvent } from '$lib/types/shell';
+import type { AppInfo, ShellUpdateEvent, UpdateCheckResult } from '$lib/types/shell';
 
 type TauriCore = typeof import('@tauri-apps/api/core');
 type TauriEvent = typeof import('@tauri-apps/api/event');
@@ -36,11 +36,14 @@ export async function getAppInfo(): Promise<AppInfo | null> {
 	return (await core.invoke<AppInfo>('app_info')) ?? null;
 }
 
-/** 检查 llama.cpp 更新（只报告不下载）。浏览器模式返回 null。 */
-export async function checkAppUpdate(): Promise<string | null> {
+/**
+ * 检查 llama.cpp 更新（只报告不下载）。浏览器模式返回 null。
+ * 返回结构化结果：ok=false 时 message 里带失败原因（网络/代理建议）。
+ */
+export async function checkAppUpdate(): Promise<UpdateCheckResult | null> {
 	const core = await tauriCore();
 	if (!core) return null;
-	return await core.invoke<string>('app_check_update');
+	return await core.invoke<UpdateCheckResult>('app_check_update');
 }
 
 /**

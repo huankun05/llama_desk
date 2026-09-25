@@ -1147,3 +1147,27 @@ webui/manager_pkg/
 - 验收：cargo check 0 错 0 警；probe_about_tab 5/5、probe_settings_page 12/12；
   svelte-check 0 错；部署 `overlay.js?v=111`。
 - ⚠️ **仍需用户重建 exe** 后真机验证：版本号显示 v1.0.0 / Switch 开关生效 / 托盘变 3 项 / tooltip 带版本。
+
+**更新检查三项修复 ✅（9-25 晚，用户截图反馈「版本未知 / GitHub 403 / 退出不杀服务」）**：
+- **「版本未知」根因**：`llama-server --version` 的版本行打在 **stderr**（LOG_INF 走 stderr），
+  `current_build`/`verify_after_install` 只解析 stdout → 恒 None。修复：合并 stdout+stderr 解析
+  （`local_info()` 返回构建号+完整版本行）。
+- **GitHub 403 根因**：检查更新走 `api.github.com`（匿名 60 次/h/IP，实测沙箱 curl 直接复现 403；
+  github.com 网页侧 200）。修复：**主路改 `releases.atom`（tag+发布日期）+ `expanded_assets/<tag>`
+  （资产列表）**，纯网页无限流；API 降为备路。资产解析锁定 x64（跳过 -arm64）。实测最新
+  b11177（2026-09-25）双路解析正确。
+- **乱码根因**：中文 Windows PowerShell 输出 GBK 被按 UTF-8 解码 → U+FFFD 菱形。修复：
+  `ps_capture` 统一注入 `[Console]::OutputEncoding=UTF8` 前缀。
+- **版本显示**：About 行显示完整版本行（如 `0.4.0-dev (build 10853, commit 9dcf84e5a)`）；
+  解析失败兜底显示 exe 修改日期（`exe_modified_date`，civil_from_days 算法无 chrono 依赖）。
+  `app_check_update` 改返回结构化 JSON（ok/message/up_to_date/local_*/latest_tag/latest_date），
+  检查失败时琥珀色显示原因+建议。
+- **退出不杀服务根因**：boot() 发现 8080/8090 已被占 →「跳过托管」→ 这些进程不在
+  Supervisor 持有列表里，`stop_owned()` 杀不到（上次异常退出的 manager 残留正是如此）。
+  修复：supervisor 新增 `stop_external_on_ports()`——netstat 找监听 PID → tasklist 校验
+  镜像名（8080 只杀 llama-server*，8090 只杀 python*）→ taskkill /F /T；
+  `RunEvent::Exit` 里在 stop_owned 之后调用。
+- **验收**：Rust 单测 8/8（parse_build/extract_between/asset 解析/civil_date）；
+  cargo test 0 错；svelte-check 0 错；probe_about 5/5 + settings 12/12；overlay v113。
+- ⚠️ **需用户重建 exe**（先确保旧 llama-desk.exe 已退出，否则 cargo 报 os error 5）后验证：
+  About 行显示版本 / 检查更新给出 b1xxxx+日期 / 托盘退出后 8080/8090 无残留进程。

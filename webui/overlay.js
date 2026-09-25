@@ -1376,7 +1376,6 @@
     'Open log folder': '打开日志目录',
     'Restarting stops and relaunches the llama-server managed by the app (models stay unloaded until the next message). Logs live in': '重启会停止并重新拉起应用托管的 llama-server（模型在下一条消息时才重新加载）。日志位于',
     'the log directory': '日志目录',
-    'Restarting the local service…': '正在重启本地服务…',
     'Could not start the updater': '无法启动更新程序',
     'Delete failed': '删除失败',
     'Export failed': '导出失败',

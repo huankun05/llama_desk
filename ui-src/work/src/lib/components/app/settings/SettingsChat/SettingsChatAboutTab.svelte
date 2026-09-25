@@ -22,7 +22,9 @@
 	/** 桌面外壳存在但 app_info 调用失败 → 用户跑的是重建前的旧 exe（IPC 命令还没编进去）。 */
 	let shellStale = $state(false);
 	let checking = $state(false);
+	/** 检查更新结果（后端结构化返回；message 已含本地/最新版本与日期） */
 	let checkResult = $state('');
+	let checkOk = $state(true);
 	/** 更新进行中：按钮禁用 + 横幅提示（更新跑在外壳的独立线程里） */
 	let updating = $state(false);
 	let updateMessage = $state('');
@@ -66,8 +68,11 @@
 		checking = true;
 		checkResult = '';
 		try {
-			checkResult = (await checkAppUpdate()) ?? '';
+			const r = await checkAppUpdate();
+			checkOk = r?.ok ?? false;
+			checkResult = r?.message ?? '';
 		} catch (e) {
+			checkOk = false;
 			checkResult = e instanceof Error ? e.message : String(e);
 		} finally {
 			checking = false;
@@ -142,8 +147,16 @@
 				</div>
 				<div class="flex items-center justify-between gap-2">
 					<span class="text-muted-foreground">llama.cpp</span>
-					<span class="font-mono">
-						{info == null ? '—' : info.llama_build == null ? 'build unknown' : `build ${info.llama_build}`}
+					<span class="text-right font-mono" data-probe="about-llama-version">
+						{#if info == null}
+							—
+						{:else if info.llama_version}
+							{info.llama_version}
+						{:else if info.llama_installed_at}
+							installed {info.llama_installed_at}
+						{:else}
+							build unknown
+						{/if}
 					</span>
 				</div>
 				<p class="text-xs text-muted-foreground">
@@ -187,7 +200,10 @@
 				</div>
 
 				{#if checking || checkResult}
-					<p class="text-xs text-muted-foreground" data-probe="about-check-result">
+					<p
+						class="text-xs {checkOk ? 'text-muted-foreground' : 'text-amber-700 dark:text-amber-300'}"
+						data-probe="about-check-result"
+					>
 						{checkResult || 'Checking…'}
 					</p>
 				{/if}

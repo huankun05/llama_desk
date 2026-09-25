@@ -223,7 +223,7 @@ export type {
 // Reasoning
 export type { ReasoningEffortLevel } from './reasoning';
 // 桌面外壳（llama-desk.exe / Tauri）：关于页 + llama.cpp 更新
-export type { AppInfo, ShellUpdateEvent } from './shell';
+export type { AppInfo, ShellUpdateEvent, UpdateCheckResult } from './shell';
 
 // Splash
 export type { SplashDimensions } from './splash';
