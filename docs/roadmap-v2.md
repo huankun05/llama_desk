@@ -1010,3 +1010,18 @@ webui/manager_pkg/
 
 **仓库**
 - GitHub 单文件 100 MB 上限；Git LFS 免费额度（1 GB 存储/1 GB 月带宽）对大模型无意义：GitHub 官方文档 + 多篇实践文
+
+---
+
+## 附录：开源化改造（9-25）
+
+**可移植性审计**：显存预算不写死（fit.py 动态读 nvidia-smi 的 memory.total），路径全部可由 `app/config.json` 覆盖（config.rs 的 D:/llama 只是默认值），大文件全被 gitignore。真正的门槛是：①README 面向自己、没有开箱路径；②Windows+NVIDIA 绑定（windll / taskkill / nvidia-smi / WDDM 计数器）；③环境不完整时静默缺数据。
+
+**第 1 级 ✅（`cd79f70`）——让别人能装**：
+- README 重写为开源文档（功能/架构/环境要求/快速上手/config 参考/数据存放位置），开发者笔记保留为下半部
+- `app/config.sample.json` 全键注释样板（README 指引复制改名 + 填绝对路径）
+- manager `GET /api/env-check`（`envcheck.py`：llama-server 致命 / models 警告 / GPU info，结构化返回、绝不抛异常）
+- 前端 `EnvCheckBanner`：环境不完整时顶部挂可关闭指引条（缺失路径原样展示），全绿或 manager 不可达时隐藏
+- tests 38/38；`probe_env_check.mjs` 7/7（拦截注入坏环境 + 真环境无条）
+
+**第 2 级（未拍板）**：无 NVIDIA 时的降级路径（隐藏 GPU 面板 / fit 提示无法预演但允许直接加载）、跨平台进程管理替代 taskkill。AMD/Intel 完整支持与 macOS/Linux 移植成本高，暂不建议。
