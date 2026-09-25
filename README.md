@@ -46,7 +46,20 @@
 | Rust + cargo | 仅构建桌面外壳时需要 |
 | NVIDIA GPU + 驱动 | 显存预演/GPU 面板依赖 `nvidia-smi`。没有也**能用**：加载/对话/模型管理/下载器全部正常，只是显存相关功能降级（界面顶部会提示） |
 
-## 快速上手
+## 下载安装（普通用户看这里）
+
+不想装 Rust/Node 工具链的话，从 [Releases](https://github.com/huankun05/llama_desk/releases)
+下载 `llama-desk.exe`，按下面三步放好即可：
+
+1. **准备目录**：任意位置建一个目录，把 `llama-desk.exe` 放进去（下文称应用目录）；
+2. **放入引擎与模型**（同「快速上手」第 1~3 步）：同级建 `bin\`（放 llama.cpp CUDA 版的
+   `llama-server.exe` 等）与 `models\`（放 .gguf），并按 `app\config.sample.json`
+   复制一份 `app\config.json`、把 6 个路径改成你的真实绝对路径；
+3. **双击 `llama-desk.exe`**。界面环境自检全绿即可开聊。
+
+> 也可以直接 clone 本仓库拿全套源码与产物（见「快速上手」），适合想改造/自行构建的用户。
+
+## 快速上手（开发者：从源码构建）
 
 ```bat
 :: 0) clone 本仓库（或下载 zip 解压）
