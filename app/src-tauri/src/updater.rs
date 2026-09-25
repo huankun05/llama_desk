@@ -210,7 +210,7 @@ try {{
 }
 
 /// 取 llama.cpp 在 GitHub 上的最新发布：先走网页馈源（无限流），失败再走 API。
-fn fetch_latest() -> Result<Latest, String> {
+pub(crate) fn fetch_latest() -> Result<Latest, String> {
     match fetch_via_atom() {
         Ok(l) => Ok(l),
         Err(atom_err) => match fetch_via_api() {
@@ -221,7 +221,7 @@ fn fetch_latest() -> Result<Latest, String> {
 }
 
 /// 解析 llama-server --version 输出里的构建号（形如 `build: 10853` / `build 10853`）。
-fn parse_build(text: &str) -> Option<u32> {
+pub(crate) fn parse_build(text: &str) -> Option<u32> {
     let lower = text.to_lowercase();
     if let Some(pos) = lower.find("build") {
         let after = &text[pos + 4..];
@@ -337,7 +337,7 @@ try {{
 /// 现在脚本每 ~800ms 把「已读字节 总字节」写进进度文件，旁边一个轮询线程
 /// 每秒读一次换成「正在下载 xx%（x/y MB）」消息经 progress 回调推给前端。
 /// 完成后校验文件非空 + 大小与 ContentLength 一致（拦截传输截断）。
-fn download(url: &str, dest: &Path, label: &str, progress: ProgressFn) -> Result<(), String> {    let tmp_dir = dest
+pub(crate) fn download(url: &str, dest: &Path, label: &str, progress: ProgressFn) -> Result<(), String> {    let tmp_dir = dest
         .parent()
         .ok_or_else(|| "下载目标没有父目录".to_string())?
         .to_path_buf();
@@ -430,7 +430,7 @@ try {{
 }
 
 /// 解压 zip 到目标目录（PowerShell Expand-Archive -Force 覆盖）。
-fn extract(zip: &Path, dest: &Path) -> Result<(), String> {
+pub(crate) fn extract(zip: &Path, dest: &Path) -> Result<(), String> {
     let zip_s = zip.to_string_lossy().replace('\\', "/");
     let dest_s = dest.to_string_lossy().replace('\\', "/");
     let script = format!(

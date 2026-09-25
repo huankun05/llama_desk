@@ -18,6 +18,10 @@ fn main() {
             "app_open_logs",
             "app_restart_llama",
             "app_restart_app",
+            "app_setup_status",
+            "app_install_engine",
+            "app_use_engine",
+            "app_open_url",
         ])),
     )
     .expect("failed to run tauri-build");

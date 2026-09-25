@@ -218,8 +218,13 @@ impl AppConfig {
         let path = Self::config_path().ok_or_else(|| {
             "找不到要写入的 config.json 路径（请用 LLAMA_DESK_CONFIG 或放到 exe 旁）".to_string()
         })?;
+        self.save_to(&path)
+    }
+
+    /// 写到指定路径（首次运行向导用：配置不存在时写到 exe 旁）。
+    pub fn save_to(&self, path: &Path) -> Result<(), String> {
         let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, text).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
+        std::fs::write(path, text).map_err(|e| format!("写入 {} 失败：{e}", path.display()))?;
         Ok(())
     }
 
@@ -231,5 +236,11 @@ impl AppConfig {
             }
         }
         None
+    }
+
+    /// 配置文件应写入的位置：已有 config.json 用它；否则用查找顺序第一档
+    /// （exe 所在目录，环境变量优先），保证下次启动 load() 一定命中。
+    pub fn target_config_path() -> Option<PathBuf> {
+        Self::config_path().or_else(|| Self::candidates().into_iter().next())
     }
 }

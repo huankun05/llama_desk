@@ -20,6 +20,10 @@
     "allow-app-set-auto-update",
     "allow-app-open-logs",
     "allow-app-restart-llama",
-    "allow-app-restart-app"
+    "allow-app-restart-app",
+    "allow-app-setup-status",
+    "allow-app-install-engine",
+    "allow-app-use-engine",
+    "allow-app-open-url"
   ]
 }

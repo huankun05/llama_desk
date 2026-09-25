@@ -19,8 +19,9 @@
     user-select: none;
   }
   .card {
-    width: 460px;
-    padding: 34px 34px 28px;
+    width: 500px;
+    max-width: 92vw;
+    padding: 30px 32px 26px;
     border-radius: 18px;
     background: linear-gradient(180deg, rgba(30,41,59,.62) 0%, rgba(15,23,42,.62) 100%);
     border: 1px solid rgba(148,163,184,.16);
@@ -62,39 +63,76 @@
   }
   body.err .msg { color: #fca5a5; }
   body.err .bar > i { background: linear-gradient(90deg, #ef4444, #b91c1c); }
+
+  /* ── 安装向导模式 ─────────────────────────────── */
+  .wizard { text-align: left; }
+  .check { margin: 0 0 18px; padding: 0; list-style: none; }
+  .check li {
+    display: flex; align-items: baseline; gap: 9px;
+    padding: 7px 10px; border-radius: 9px; font-size: 13px;
+    background: rgba(148,163,184,.07); margin-bottom: 7px;
+  }
+  .check .ic { font-weight: 700; width: 18px; text-align: center; flex: none; }
+  .check .ok .ic { color: #4ade80; }
+  .check .bad .ic { color: #fbbf24; }
+  .check .ver { margin-left: auto; font: 11px/1.4 ui-monospace, Consolas, monospace; color: #7c8aa0; text-align: right; }
+  .btn {
+    display: inline-block; width: 100%; margin: 6px 0 0;
+    padding: 10px 14px; border-radius: 10px; border: 1px solid rgba(148,163,184,.22);
+    background: linear-gradient(160deg, rgba(56,189,248,.18), rgba(99,102,241,.18));
+    color: #e6edf7; font: 600 13.5px/1.3 "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: pointer; text-align: center; transition: filter .15s, opacity .15s;
+  }
+  .btn:hover { filter: brightness(1.2); }
+  .btn:disabled { opacity: .45; cursor: default; filter: none; }
+  .btn.ghost { background: rgba(148,163,184,.08); font-weight: 500; }
+  .row { display: flex; gap: 8px; margin-top: 6px; }
+  .row input {
+    flex: 1; padding: 9px 11px; border-radius: 10px;
+    border: 1px solid rgba(148,163,184,.22); background: rgba(2,6,17,.5);
+    color: #e6edf7; font: 12.5px/1.3 ui-monospace, Consolas, monospace;
+  }
+  .row input:focus { outline: 1px solid rgba(56,189,248,.55); }
+  .row .btn { width: auto; white-space: nowrap; margin: 0; }
+  .divider { margin: 16px 0 10px; font-size: 11.5px; color: #7c8aa0; text-align: center; }
+  .divider::before, .divider::after { content: "—"; color: rgba(148,163,184,.3); margin: 0 8px; }
+  .note { font-size: 11.5px; color: #fbbf24; line-height: 1.6; margin: 8px 0 0; }
+  .note a { color: #7dd3fc; cursor: pointer; text-decoration: underline; }
+  .wizardmsg { min-height: 20px; margin-top: 12px; font-size: 12.5px; color: #cbd5e1; text-align: center; }
+  body.err .wizardmsg { color: #fca5a5; }
+  .spin {
+    display: inline-block; width: 13px; height: 13px; vertical-align: -2px; margin-right: 6px;
+    border: 2px solid rgba(148,163,184,.3); border-top-color: #38bdf8; border-radius: 50%;
+    animation: wspin .8s linear infinite;
+  }
+  @keyframes wspin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
   <div class="card">
     <div class="logo">&gt;_</div>
-    <h1>llama.cpp 本地服务</h1>
-    <p class="sub">llama-desk 正在编排后端进程</p>
-
-    <div class="msg" id="msg">正在初始化…</div>
-    <div class="bar"><i id="bar"></i></div>
-    <div class="pct" id="pct">0%</div>
-
-    <div class="hint">
-      首次加载模型约 10–25 秒。界面就绪后会自动跳转到合并性能页。<br />
-      若长时间停在此处，请查看 <code>D:\llama\app\logs\</code> 下的日志。
-    </div>
+    <h1 id="title">llama.cpp 本地服务</h1>
+    <p class="sub" id="subtitle">llama-desk 正在编排后端进程</p>
+    <div id="stage"></div>
   </div>
 
 <script>
-  var msgEl = document.getElementById('msg');
-  var barEl = document.getElementById('bar');
-  var pctEl = document.getElementById('pct');
+  var stageEl = document.getElementById('stage');
 
+  // ── 引导条模式（编排进程 eval __boot 驱动；向导模式下 stage 被替换，全部空操作）──
   window.__boot = function (m, p, err) {
+    var msgEl = document.getElementById('msg');
+    var barEl = document.getElementById('bar');
+    var pctEl = document.getElementById('pct');
+    if (!msgEl) return; // 已切换到向导视图，忽略编排进度
     if (typeof m === 'string' && m) msgEl.textContent = m;
     var v = Math.max(0, Math.min(100, Number(p) || 0));
-    barEl.style.width = v + '%';
-    pctEl.textContent = v + '%';
+    if (barEl) barEl.style.width = v + '%';
+    if (pctEl) pctEl.textContent = v + '%';
     document.body.classList.toggle('err', !!err);
   };
 
   // 心跳：告诉 Rust 侧「WebView2 真的把界面渲染出来了」。
-  // 窗口建好但渲染失败时页面是白的，Rust 侧据此回退到系统浏览器。
   (function () {
     function ping() {
       try {
@@ -108,6 +146,149 @@
     var n = 0;
     var t = setInterval(function () { if (ping() || ++n > 50) clearInterval(t); }, 100);
   })();
+
+  // ── 首次运行向导 ────────────────────────────────────────────
+  function invoke(cmd, args) {
+    var inv = (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke)
+      || (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke);
+    if (!inv) return Promise.reject(new Error('no-tauri'));
+    return inv(cmd, args || {});
+  }
+
+  var st = null;          // 最近一次环境快照
+  var acting = false;     // 安装/校验进行中
+  var doneHandled = false;
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  function render() {
+    if (!st) return;
+    var engine = st.engine || {}, python = st.python || {};
+    var rows = '';
+    rows += '<li class="' + (engine.ok ? 'ok' : 'bad') + '"><span class="ic">' + (engine.ok ? '✓' : '!')
+      + '</span>llama.cpp 引擎<span class="ver">' + (engine.ok ? esc(engine.version) : '未找到') + '</span></li>';
+    rows += '<li class="' + (python.ok ? 'ok' : 'bad') + '"><span class="ic">' + (python.ok ? '✓' : '!')
+      + '</span>Python（管理后端）<span class="ver">' + (python.ok ? esc(python.version) : '未检测到') + '</span></li>';
+    rows += '<li class="' + (st.webui_ok ? 'ok' : 'bad') + '"><span class="ic">' + (st.webui_ok ? '✓' : '!')
+      + '</span>界面文件（webui）<span class="ver">' + (st.webui_ok ? '就绪' : '缺失') + '</span></li>';
+
+    var html = '<div class="wizard"><ul class="check">' + rows + '</ul>';
+
+    if (!st.webui_ok) {
+      html += '<p class="note">界面文件缺失：请到 GitHub 仓库页 Code → Download ZIP 下载，'
+        + '把其中的 <b>webui</b> 目录放到 <code>' + esc(st.root) + '</code> 下，然后重启本应用。</p>';
+    }
+    if (!python.ok) {
+      html += '<p class="note">管理后端需要 Python 3.10+：'
+        + '<a id="pylink">打开 Python 官网下载页</a>（安装时勾选 <b>Add python.exe to PATH</b>），'
+        + '装好后点「重新检测」。没有它引擎和对话也能用，只是模型列表/监控不可用。</p>';
+    }
+
+    if (!engine.ok && st.webui_ok) {
+      html += '<button class="btn" id="dlbtn">一键下载最新引擎（约 550 MB，需网络）</button>';
+      html += '<div class="divider">或者</div>';
+      html += '<div class="row"><input id="engpath" placeholder="粘贴已有 llama-server.exe 的完整路径" spellcheck="false">'
+        + '<button class="btn ghost" id="usebtn">检测并使用</button></div>';
+    }
+    if (engine.ok && !st.config_exists) {
+      html += '<button class="btn" id="cfgbtn">生成配置并启动（自动写入全部路径）</button>';
+    }
+    html += '<div class="wizardmsg" id="wmsg"></div></div>';
+    stageEl.innerHTML = html;
+    bind();
+  }
+
+  function setMsg(text, isErr, spinning) {
+    var el = document.getElementById('wmsg');
+    if (!el) return;
+    el.innerHTML = (spinning ? '<span class="spin"></span>' : '') + esc(text);
+    document.body.classList.toggle('err', !!isErr);
+  }
+
+  function setBusy(b) {
+    acting = b;
+    ['dlbtn', 'usebtn', 'cfgbtn', 'pylink'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.style.pointerEvents = b ? 'none' : '';
+      if (el && el.style) el.style.opacity = b ? '.45' : '';
+    });
+  }
+
+  function restartApp() {
+    document.getElementById('title').textContent = '安装完成';
+    setMsg('正在重启应用加载新配置…', false, true);
+    setTimeout(function () { invoke('app_restart_app').catch(function () {}); }, 1200);
+  }
+
+  function bind() {
+    var py = document.getElementById('pylink');
+    if (py) py.onclick = function () { invoke('app_open_url', { url: 'https://www.python.org/downloads/' }).catch(function () {}); };
+
+    var dl = document.getElementById('dlbtn');
+    if (dl) dl.onclick = function () {
+      setBusy(true); doneHandled = false;
+      setMsg('正在初始化下载…', false, true);
+      invoke('app_install_engine').catch(function (e) { setBusy(false); setMsg(String(e), true); });
+      pollInstall();
+    };
+
+    var use = document.getElementById('usebtn');
+    if (use) use.onclick = function () {
+      var p = document.getElementById('engpath').value.trim();
+      if (!p) { setMsg('请先粘贴 llama-server.exe 的完整路径', true); return; }
+      setBusy(true);
+      setMsg('正在检测引擎…', false, true);
+      invoke('app_use_engine', { path: p })
+        .then(function (msg) { setMsg(msg, false); restartApp(); })
+        .catch(function (e) { setBusy(false); setMsg(String(e), true); });
+    };
+
+    var cfg = document.getElementById('cfgbtn');
+    if (cfg) cfg.onclick = function () {
+      setBusy(true);
+      setMsg('正在生成配置…', false, true);
+      invoke('app_use_engine', { path: (st.engine && st.engine.path) || '' })
+        .then(function (msg) { setMsg(msg, false); restartApp(); })
+        .catch(function (e) { setBusy(false); setMsg(String(e), true); });
+    };
+  }
+
+  // 安装是后台线程：每 1.5 秒轮询快照（阶段消息 / 结束标记）
+  function pollInstall() {
+    var t = setInterval(function () {
+      invoke('app_setup_status').then(function (s) {
+        st = s;
+        var inst = s.install || {};
+        if (inst.running) { setMsg(inst.stage || '正在下载…', false, true); return; }
+        clearInterval(t);
+        if (doneHandled) return;
+        doneHandled = true;
+        var done = String(inst.done || '');
+        if (done.indexOf('ok:') === 0) {
+          setMsg(done.slice(3), false);
+          setTimeout(restartApp, 1200);
+        } else {
+          setBusy(false);
+          setMsg(done.indexOf('err:') === 0 ? done.slice(4) : '安装失败（原因未知，请查看日志）', true);
+        }
+      }).catch(function () { clearInterval(t); setBusy(false); });
+    }, 1500);
+  }
+
+  // 挂载即探测环境：缺东西 → 向导模式；全绿 → 保持引导条（编排就绪后自动跳转）
+  invoke('app_setup_status').then(function (s) {
+    st = s;
+    var needWizard = !(s.engine && s.engine.ok && s.webui_ok && s.config_exists);
+    if (needWizard) {
+      document.getElementById('title').textContent = '欢迎使用 llama-desk';
+      document.getElementById('subtitle').textContent = '首次设置 · 检测到还缺以下组件';
+      render();
+    }
+  }).catch(function () { /* 非 Tauri / 旧外壳：保持引导条 */ });
 </script>
 </body>
 </html>

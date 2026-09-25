@@ -9,6 +9,7 @@
 - **模型管理**：磁盘扫描、HuggingFace 搜索下载（大小/量化筛选）、标签/收藏/备注、回收站式删除
 - **可观测**：GPU/显存/CPU/内存实时指标、空闲自动卸载、一键轻量基准
 - **中文界面**：运行时注入 overlay.js，不改官方构建产物，可一键切回英文
+- **首次运行向导**：缺引擎就一键下载（或复用本地路径），配置自动生成，零手改文件
 - **方案系统**：每个模型各自一套启动参数方案 + 按模型覆盖，支持导入导出备份
 
 > 引擎就是原版 llama.cpp——推理性能与命令行直跑完全一致；本项目只做「外围管理」。
@@ -48,16 +49,17 @@
 
 ## 下载安装（普通用户看这里）
 
-不想装 Rust/Node 工具链的话，从 [Releases](https://github.com/huankun05/llama_desk/releases)
-下载 `llama-desk.exe`，按下面三步放好即可：
+1. **下载两样东西**：[Releases](https://github.com/huankun05/llama_desk/releases) 里的
+   `llama-desk.exe` + 仓库主页 **Code → Download ZIP** 的源码包（内含 webui 界面与配置样板），解压；
+2. **把 `llama-desk.exe` 放进解压目录**（与 `webui` 文件夹同级），双击运行；
+3. **首次启动出现安装向导**，缺什么引导什么：
+   - **llama.cpp 引擎**：点「一键下载最新引擎」（CUDA 版约 550MB，自动放进 `bin\`），
+     或粘贴本地已有 `llama-server.exe` 路径**直接复用**；
+   - **Python**：未检测到时给出官方下载指引（装时勾选 Add python.exe to PATH）；
+   - **config.json**：全部路径自动生成，装完自动重启，全程不碰配置文件；
+4. 把 `.gguf` 模型放进 `models\`，在界面里加载即可开聊。
 
-1. **准备目录**：任意位置建一个目录，把 `llama-desk.exe` 放进去（下文称应用目录）；
-2. **放入引擎与模型**（同「快速上手」第 1~3 步）：同级建 `bin\`（放 llama.cpp CUDA 版的
-   `llama-server.exe` 等）与 `models\`（放 .gguf），并按 `app\config.sample.json`
-   复制一份 `app\config.json`、把 6 个路径改成你的真实绝对路径；
-3. **双击 `llama-desk.exe`**。界面环境自检全绿即可开聊。
-
-> 也可以直接 clone 本仓库拿全套源码与产物（见「快速上手」），适合想改造/自行构建的用户。
+> 也可以 clone 本仓库拿全套源码自行构建（见「快速上手」），适合想改造的用户。
 
 ## 快速上手（开发者：从源码构建）
 

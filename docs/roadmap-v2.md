@@ -1251,3 +1251,20 @@ webui/manager_pkg/
 - 验收：cargo test 9/9；svelte-check 0/0；probe_about 5/5 + settings 12/12；
   CJK 0 处；dict 待补 0；overlay v118。⚠️ 需用户重建 exe 后验证
   （本轮更新已把 llama.cpp 升到 b11178，界面横幅消失可先重开设置页确认）。
+
+**首次运行向导 ✅（9-25 深夜，用户诉求「下载后一键安装/复用已有引擎」）**：
+- 新增 `app/src-tauri/src/setup.rs`：环境快照（引擎/Python/webui/config 四项探测 +
+  安装进度）+ 一键下载引擎（复用 updater 的 fetch_latest/download/extract 装进
+  `<root>/bin`，app_root() 从 exe 向上找含 webui/index.html 的目录定位仓库根）+
+  复用本地引擎（粘贴路径 + `--version` 冒烟校验）+ 自动写 config.json
+  （config.rs 新增 `save_to`/`target_config_path`；root 下 webui/manager/logs/webview
+  路径全自动，models 目录顺手创建，autostart 强制 false）。
+- 启动页 `app/ui/index.html` 重写：挂载即 `app_setup_status`，全绿走原引导条；
+  缺组件切向导视图（清单 + 一键下载/粘贴复用/生成配置三动作 + Python 官网指引 +
+  webui 缺失提示），进度靠轮询快照（裸 HTML 无 event 模块）；成功自动
+  `app_restart_app` 重启加载新配置。`__boot` 加空元素守卫兼容向导模式。
+- 新命令 4 个（app_setup_status/app_install_engine/app_use_engine/app_open_url），
+  build.rs + capability 同步（ACL 铁律再次执行，4 个 allow-* 已验证生成）。
+  updater 的 fetch_latest/download/extract/parse_build 放开为 pub(crate)。
+- 验收：cargo test 11/11（+write_config 组装、app_root 定位）；cargo check 零警告；
+  ACL 4 权限生成确认。⚠️ 需用户重建 exe 后真机验证向导（开发机全绿不触发）。

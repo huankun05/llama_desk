@@ -36,6 +36,21 @@
 llama.cpp 引擎（`bin/`）、聊天备份、日志、WebView 数据全部存放在 exe 之外，
 替换 exe 文件本身不影响任何用户数据。
 
+## 首次运行向导（2026-09-25 起，新用户安装流程）
+
+用户拿到 exe 后（配合仓库 Code → Download ZIP 的源码包，提供 webui 界面文件），
+双击启动即进入**安装向导**（启动页检测缺什么引导什么，全程不手改配置）：
+
+| 组件 | 缺失时的引导 |
+|---|---|
+| llama.cpp 引擎 | 「一键下载最新引擎」（复用 updater 下载机制装进 `<root>/bin`，带进度）或粘贴本地 `llama-server.exe` 路径复用（`--version` 冒烟校验） |
+| Python | 检测不到给出 python.org 下载页链接 + PATH 勾选提示（不阻塞引擎安装） |
+| webui 界面文件 | 提示从仓库 ZIP 补齐（不自动下载） |
+| config.json | 前两步完成后自动生成全部绝对路径并自动重启应用 |
+
+对应 IPC：`app_setup_status`（环境快照，启动页轮询）/ `app_install_engine` /
+`app_use_engine` / `app_open_url`。实现见 `app/src-tauri/src/setup.rs`。
+
 ## 后续可做（未实现）
 
 - Release 附件校验（SHA256SUMS 文件）；

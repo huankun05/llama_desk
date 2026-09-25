@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod config;
+mod setup;
 mod supervisor;
 mod updater;
 
@@ -231,6 +232,40 @@ fn app_open_logs(app: AppHandle) {
     supervisor::open_dir(&dir);
 }
 
+// ── 首次运行向导（启动页轮询这套命令）────────────────────────────
+
+/// 环境快照：引擎/Python/界面文件/配置是否就位 + 安装进度。浏览器模式没有 IPC，
+/// 启动页对 invoke 失败有兜底（保持原有引导条为）。
+#[tauri::command]
+async fn app_setup_status(app: AppHandle) -> Result<serde_json::Value, String> {
+    let cfg = app.state::<AppConfig>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || setup::status_json(&cfg))
+        .await
+        .map_err(|e| format!("app_setup_status 失败：{e}"))
+}
+
+/// 一键下载最新 llama.cpp 引擎到应用根 bin/（约 550MB，进度经轮询读取）。
+#[tauri::command]
+fn app_install_engine() -> Result<(), String> {
+    setup::start_install()
+}
+
+/// 复用本地已有的 llama-server.exe：校验版本可用后写配置。
+#[tauri::command]
+fn app_use_engine(path: String) -> Result<String, String> {
+    setup::use_engine(&path)
+}
+
+/// 用系统默认程序打开 URL（向导里跳 Python 官方下载页）。
+#[tauri::command]
+fn app_open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("只允许打开 http(s) 链接".into());
+    }
+    supervisor::open_external(&url);
+    Ok(())
+}
+
 /// 重启整个应用（llama.cpp 更新装完后由「关于应用」页的确认按钮调用）：
 /// ① 右下角系统通知「应用正在更新」；② 延迟拉起新实例；③ 本进程退出 ——
 /// RunEvent::Exit 里会收拾托管的 llama-server/manager，新实例起来后再重新编排拉起。
@@ -413,7 +448,11 @@ fn main() {
             app_set_auto_update,
             app_open_logs,
             app_restart_llama,
-            app_restart_app
+            app_restart_app,
+            app_setup_status,
+            app_install_engine,
+            app_use_engine,
+            app_open_url
         ])
         .plugin(tauri_plugin_notification::init())
         // 第二实例只负责把已有窗口叫到前台
