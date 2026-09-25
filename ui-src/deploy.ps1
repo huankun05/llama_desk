@@ -21,7 +21,8 @@ if (Test-Path $dst) { Copy-Item $dst $backup -Recurse -Force; Write-Host "已备
 # 清理 dst 下的旧构建产物，再拷入新构建。
 # 下面这些是「非构建产物」，构建产物里没有、部署时必须原样保留：
 #   overlay.js               运行时中文注入层（不参与打包）
-#   manager.py               自研监控后端（:8090）
+#   manager.py               自研监控后端（:8090）的 3 行 shim
+#   manager_pkg/             H2 拆包后的 manager 真身（标准库零依赖包）
 #   _dumpsettings.js         自定义调试脚本
 #   start-manager.bat        管理器启动脚本
 #   start-minicpm5-webui.bat WebUI 启动脚本
@@ -29,7 +30,7 @@ if (Test-Path $dst) { Copy-Item $dst $backup -Recurse -Force; Write-Host "已备
 # 另外 *.log 与 __pycache__ 也一并保留：删了没用还容易误伤，留着更安全。
 # ---------------------------------------------------------------------------
 $KEEP = @(
-	'backup', 'overlay.js', 'manager.py', '_dumpsettings.js',
+	'backup', 'overlay.js', 'manager.py', 'manager_pkg', '_dumpsettings.js',
 	'start-manager.bat', 'restart-manager.bat', 'start-minicpm5-webui.bat'
 )
 

@@ -201,5 +201,85 @@ class TestParseGgufReal(unittest.TestCase):
         self.assertIn("general.architecture", meta)
 
 
+class TestModelMeta(unittest.TestCase):
+    def setUp(self):
+        import manager_pkg.meta as meta
+        self.meta = meta
+        self.tmp = tempfile.mkdtemp()
+        self._orig_file = meta.MODEL_META_FILE
+        meta.MODEL_META_FILE = os.path.join(self.tmp, "model_meta.json")
+        meta.model_meta = {}
+
+    def tearDown(self):
+        self.meta.MODEL_META_FILE = self._orig_file
+
+    def test_set_and_get(self):
+        p = "D:/llama/models/from-hf/a.gguf"
+        self.assertTrue(self.meta.set_model_meta(p, tags=["聊天", "重要"], note="n", favorite=True))
+        m = self.meta.get_model_meta()
+        self.assertEqual(m[self.meta._norm_key(p)]["tags"], ["聊天", "重要"])
+        self.assertTrue(m[self.meta._norm_key(p)]["favorite"])
+
+    def test_tags_dedup_and_cap(self):
+        p = "D:/llama/models/from-hf/a.gguf"
+        self.meta.set_model_meta(p, tags=["x", "x", "y"] * 20)
+        tags = self.meta.get_model_meta()[self.meta._norm_key(p)]["tags"]
+        self.assertEqual(len(tags), len(set(tags)))           # 去重
+        self.assertLessEqual(len(tags), 32)                   # 限长
+
+    def test_empty_removes_key(self):
+        p = "D:/llama/models/from-hf/a.gguf"
+        self.meta.set_model_meta(p, favorite=True)
+        self.meta.set_model_meta(p, tags=[], note="", favorite=False)
+        self.assertNotIn(self.meta._norm_key(p), self.meta.get_model_meta())
+
+    def test_persist_to_disk(self):
+        p = "D:/llama/models/from-hf/a.gguf"
+        self.meta.set_model_meta(p, favorite=True)
+        self.assertTrue(os.path.isfile(self.meta.MODEL_META_FILE))
+
+
+class TestModelDeleteCheck(unittest.TestCase):
+    def setUp(self):
+        import manager_pkg.meta as meta
+        self.meta = meta
+        self.tmp = tempfile.mkdtemp()
+        self.meta.MODELS_ROOT = os.path.join(self.tmp, "models")
+        self.meta.MODEL_DELETE_ALLOWED_ROOTS = [self.meta.MODELS_ROOT]
+        self.meta.MODEL_DELETE_BLOCKED_ROOTS = [os.path.join(self.meta.MODELS_ROOT, "from-ollama")]
+        os.makedirs(os.path.join(self.meta.MODELS_ROOT, "from-hf"), exist_ok=True)
+
+    def _mk(self, sub):
+        fp = os.path.join(self.meta.MODELS_ROOT, sub)
+        os.makedirs(os.path.dirname(fp), exist_ok=True)
+        open(fp, "wb").write(b"x" * 1024)
+        return fp
+
+    def test_deletable_from_hf(self):
+        c = self.meta.model_delete_check(self._mk("from-hf/good.gguf"))
+        self.assertTrue(c["deletable"])
+
+    def test_blocked_ollama_mirror(self):
+        c = self.meta.model_delete_check(self._mk("from-ollama/m.gguf"))
+        self.assertFalse(c["deletable"])
+        self.assertEqual(c["reason"], "ollama_mirror")
+
+    def test_blocked_outside_root(self):
+        c = self.meta.model_delete_check("C:/Windows/system32.gguf")
+        # 不存在 -> not_found；存在的外部路径 -> outside_allowed_root
+        self.assertEqual(c["reason"], "not_found")
+
+    def test_blocked_when_loaded(self):
+        from manager_pkg import instances
+        fp = self._mk("from-hf/loaded.gguf")
+        instances["x"] = {"model_path": fp}
+        try:
+            c = self.meta.model_delete_check(fp)
+            self.assertFalse(c["deletable"])
+            self.assertEqual(c["reason"], "loaded")
+        finally:
+            instances.clear()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -13,6 +13,8 @@ from .state import (WEBUI_DIR, MODEL_DIRS, LLAMA_SERVER, PORT, instances, inst_l
 from .gguf import (parse_gguf, parse_gguf_cached, prune_gguf_cache, guess_quant,
                    kv_shape, sweep_parked_aliases, find_mmproj, GGUF_VAL_TYPES)
 from .scan import _do_scan, get_models, _refresher
+from .meta import (get_model_meta, set_model_meta, model_delete_check,
+                   model_delete, _load_meta)
 from .fit import (LLAMA_FIT, FIT_TARGET_MIB, FIT_MIN_LAYERS, FIT_TIMEOUT,
                   AUTO_KV_LADDER, AUTO_CTX_FLOOR, AUTO_OFFLOAD_ADAPT, FIT_PLAN_TTL,
                   FIT_MEM_REF_CTX, FIT_CACHE_FILE, FIT_CACHE_TTL, FIT_CACHE_MAX,
@@ -445,6 +447,35 @@ class Handler(BaseHTTPRequestHandler):
                 iid = p.split("/")[-1]
                 ok = stop_instance(iid)
                 self.json(200, {"ok": ok})
+            # ---------- 第 4 批 ③：模型标签 / 收藏 / 备注 + 回收站删除 ----------
+            elif p == "/api/model-meta":
+                if data is None:
+                    # GET：返回全部 meta（key = norm_key，即小写绝对路径）
+                    self.json(200, {"ok": True, "meta": get_model_meta()})
+                else:
+                    path = (data or {}).get("path")
+                    if not path:
+                        self.json(400, {"ok": False, "error": "path required"})
+                    else:
+                        ok, err = set_model_meta(
+                            path,
+                            tags=(data or {}).get("tags"),
+                            note=(data or {}).get("note"),
+                            favorite=(data or {}).get("favorite"))
+                        if ok:
+                            self.json(200, {"ok": True, "meta": get_model_meta()})
+                        else:
+                            self.json(400, {"ok": False, "error": err})
+            elif p == "/api/model-delete-check":
+                q = parse_qs(u.query)
+                path = (q.get("path") or [""])[0]
+                self.json(200, model_delete_check(path))
+            elif p == "/api/model-delete" and data is not None:
+                path = (data or {}).get("path")
+                if not path:
+                    self.json(400, {"ok": False, "error": "path required"})
+                else:
+                    self.json(200, model_delete(path))
             # ---------- 第 2 批 A：HuggingFace 下载器 ----------
             elif p == "/api/hf-search":
                 qs = parse_qs(u.query)

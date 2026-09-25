@@ -410,6 +410,35 @@ export interface HfFilesResponse {
 	files: HfFileSummary[];
 }
 
+/** ③ 模型元数据（标签/收藏/备注），manager 落盘 model_meta.json。 */
+export interface ManagerModelMeta {
+	tags?: string[];
+	note?: string;
+	favorite?: boolean;
+}
+
+export interface ModelMetaMap {
+	ok: boolean;
+	meta: Record<string, ManagerModelMeta>;
+}
+
+/** ③ 删除前只读校验结果（manager 守卫：路径根/硬链接/加载中）。 */
+export interface ModelDeleteCheck {
+	ok: boolean;
+	deletable: boolean;
+	reason: 'ok' | 'not_found' | 'outside_allowed_root' | 'ollama_mirror' | 'hardlink' | 'loaded';
+	size_gb: number;
+	is_hardlink: boolean;
+	loaded: boolean;
+}
+
+export interface ModelDeleteResult {
+	ok: boolean;
+	deleted: boolean;
+	recycled: string | null;
+	error: string | null;
+}
+
 export interface HfJob {
 	id: string;
 	repo: string;
@@ -504,6 +533,34 @@ export class ManagerService {
 	/** F：GPU 健康时序 + 人话归因（manager 后台 2s 采样，环形缓冲 1 小时）。 */
 	static gpuHistory(seconds = 60): Promise<ManagerGpuHistory> {
 		return managerFetch<ManagerGpuHistory>(`/api/gpu-history?seconds=${seconds}`);
+	}
+
+	/** ③：拉取整份模型元数据（标签/收藏/备注），前端合并进模型列表。 */
+	static modelMetaGet(): Promise<ModelMetaMap> {
+		return managerFetch<ModelMetaMap>('/api/model-meta');
+	}
+
+	/** ③：写单个模型元数据（只覆盖传了的字段）。 */
+	static modelMetaSet(path: string, patch: Partial<ManagerModelMeta>): Promise<{ ok: boolean }> {
+		return managerFetch<{ ok: boolean }>('/api/model-meta', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ path, ...patch }),
+		});
+	}
+
+	/** ③：删除前只读校验（路径根/硬链接/加载中）。 */
+	static modelDeleteCheck(path: string): Promise<ModelDeleteCheck> {
+		return managerFetch<ModelDeleteCheck>(`/api/model-delete-check?path=${encodeURIComponent(path)}`);
+	}
+
+	/** ③：回收站式删除（manager 校验后执行）。 */
+	static modelDelete(path: string): Promise<ModelDeleteResult> {
+		return managerFetch<ModelDeleteResult>('/api/model-delete', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ path }),
+		});
 	}
 
 	/**

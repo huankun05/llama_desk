@@ -9,6 +9,7 @@ from .state import (WEBUI_DIR, LLAMA_SERVER, PORT, SCRIPT_MTIME_AT_START,
                     _script_mtime)
 from .gguf import parse_gguf
 from .scan import _do_scan, get_models, _refresher
+from .meta import _load_meta
 from .fit import LLAMA_FIT, _fit_prewarm_loop
 from .instances import _idle_watchdog, IDLE_TTL_DEFAULT
 from .metrics import _sys_refresher, _gpu_refresher, _gpu_sampler
@@ -53,6 +54,7 @@ def main():
           f"（环境变量 LLAMA_IDLE_TTL 可改）")
     print("  预热模型缓存（首次扫描约 10s，取决于 Defender 实时扫描）…")
     _do_scan()
+    _load_meta()   # 第 4 批 ③：启动即把模型标签/收藏/备注读进内存
     print(f"  已缓存 {len(get_models())} 个模型")
     threading.Thread(target=_refresher, daemon=True).start()
     threading.Thread(target=_idle_watchdog, daemon=True).start()

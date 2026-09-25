@@ -22,6 +22,20 @@ MODEL_DIRS = [
 LLAMA_SERVER = os.path.join(WEBUI_DIR, "..", "bin", "llama-server.exe")
 PORT = 8090
 
+# ---------- 第 4 批 ③：模型标签 / 收藏 / 备注 + 回收站式删除 ----------
+# 用户 meta（标签/收藏/备注）持久化文件，与扫描结果解耦：删模型文件不影响 meta，
+# 删 meta 也不碰磁盘上的模型。key 一律用 norm_key（normcase(abspath)）。
+MODEL_META_FILE = os.path.join(WEBUI_DIR, "model_meta.json")
+# 模型根目录（models/），删除操作的唯一允许根。
+MODELS_ROOT = os.path.normpath(os.path.join(WEBUI_DIR, "..", "models"))
+# 允许删除的根（只此一个：models/ 及其子目录）。
+MODEL_DELETE_ALLOWED_ROOTS = [MODELS_ROOT]
+# 禁止删除的根（Ollama 硬链接镜像：删了会搞坏 Ollama 的 blob 引用）。
+MODEL_DELETE_BLOCKED_ROOTS = [os.path.normpath(os.path.join(MODELS_ROOT, "from-ollama"))]
+# 内存中的 meta 表；启动时 _load_meta() 读盘，写时 _save_meta() 落盘。
+model_meta = {}
+model_meta_lock = threading.Lock()
+
 instances = {}   # id -> dict（原 L32）
 inst_lock = threading.Lock()
 
