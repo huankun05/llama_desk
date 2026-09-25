@@ -15,6 +15,7 @@ from .gguf import (parse_gguf, parse_gguf_cached, prune_gguf_cache, guess_quant,
 from .scan import _do_scan, get_models, _refresher
 from .meta import (get_model_meta, set_model_meta, model_delete_check,
                    model_delete, _load_meta, trash_list, trash_clear)
+from .envcheck import env_check
 from .fit import (LLAMA_FIT, FIT_TARGET_MIB, FIT_MIN_LAYERS, FIT_TIMEOUT,
                   AUTO_KV_LADDER, AUTO_CTX_FLOOR, AUTO_OFFLOAD_ADAPT, FIT_PLAN_TTL,
                   FIT_MEM_REF_CTX, FIT_CACHE_FILE, FIT_CACHE_TTL, FIT_CACHE_MAX,
@@ -188,6 +189,10 @@ class Handler(BaseHTTPRequestHandler):
                                 "script_mtime": _script_mtime(),
                                 "script_mtime_at_start": SCRIPT_MTIME_AT_START,
                                 "stale": _is_stale()})
+            elif p == "/api/env-check":
+                # 环境自检（开源用户指引条的数据源）：llama-server/models/GPU。
+                # 永远 200 + 结构化字段，自身绝不抛异常。
+                self.json(200, env_check())
             elif p == "/api/last-model":
                 # 「上一次使用的模型」（见 get_last_model 的注释）。应用以零模型哨兵
                 # 启动时，界面靠它显示「上次使用 · 未加载」，并在首次对话时按需加载。

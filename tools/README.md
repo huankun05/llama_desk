@@ -60,6 +60,7 @@ tools\
 | `probe_r8_ui_fixes.mjs` | **第 8 轮 UI 加固综合验收**（产出 `diag/shots-20260923-r8/`）：① 侧边栏顺序（`svg.lucide-download` 在 `svg.lucide-settings` 上方）；② 设置页左栏实测 192px（w-48）/ 内容 768px（max-w-3xl）/ 旧 `w-64` 绝迹；③ B-L3 预算条用 chart 色板、纯黑 `bg-primary` 段绝迹、超出容量时出现算术行；④ 下载页排序下拉（bits-ui 这版 **Select.Trigger 不带 `role=combobox`，要选 `[data-slot="select-trigger"]`**）+ 模糊搜索 "qwen" ≥10 条。13 项断言。依赖 8080+8090。⚠️ 沙箱会回收后台哨兵进程（~10 分钟无声死亡），跑之前先 `curl /health` 确认。 |
 | `probe_model_meta.mjs` | **第 4 批 ③「模型标签/收藏/备注 + 回收站删除」端到端验收**（产出 `diag/shots-model-meta/`）：A 部分（免加载）挂载 + `:8090` 模型列表 + 无 JS 异常；B 部分（需已加载模型）聊天下拉 → 行内「⋯」→ **Manage** → 断言弹窗含 Favorite/Tags/Note/回收站按钮 → 点删除出现守卫/确认 UI（不真删）。10 项断言。⚠️ **Manage 入口在新构建里才有**（`f6f7ecb` 之前弹窗不可达会报「未找到信息按钮」）；⚠️ overlay 连 `aria-label` 一起翻译（`Model selector`→`模型选择器`），选择器必须中英文都匹配。 |
 | `probe_model_filter.mjs` | **「模型列表按标签/收藏筛选」验收**：装载模型后打开聊天下拉，断言筛选行存在（★ 仅看收藏 + 标签 chip）→ 点 ★ 后选项数收窄 → 点标签 chip 再收窄 → 取消恢复全量。8 项断言。⚠️ 需要 `:8080` 已装载模型（单模型模式聊天下拉才是 `ModelLoaderDropdown`）；沙箱可 `POST /api/switch` 装 1.8B 模拟，测完 `DELETE /api/instances/<id>` 卸载。 |
+| `probe_env_check.mjs` | **开源化「环境自检指引条」验收**：场景 1 拦截 `/api/env-check` 注入坏环境（llama-server 缺失+无模型+无 GPU）→ 断言红条出现、三段提示含路径、点关闭消失；场景 2 不拦截（真环境全绿）→ 断言无条。7 项断言。⚠️ 提示文案会被 overlay 翻成中文，正则必须中英都匹配。 |
 | `mock_webui_server.py` | 没有后端时起一个假 `:8080`，用来单独验 UI（静态目录写死 `D:\llama\webui`）。 |
 | `start_for_ui.py` | 起一个测试用模型实例（给 UI 验证提供数据源），用完自动空闲卸载。 |
 

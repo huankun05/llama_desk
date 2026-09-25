@@ -456,6 +456,22 @@ export interface ManagerTrashCleared {
 	removed: number;
 }
 
+/** 环境自检结果（开源用户首次运行的指引数据源） */
+export interface ManagerEnvCheckItem {
+	ok: boolean;
+	path: string;
+	count?: number;
+	error?: string;
+}
+
+export interface ManagerEnvCheck {
+	ok: boolean;
+	webui_dir: string;
+	llama_server: ManagerEnvCheckItem;
+	models: ManagerEnvCheckItem;
+	gpu: ManagerEnvCheckItem;
+}
+
 export interface HfJob {
 	id: string;
 	repo: string;
@@ -592,6 +608,11 @@ export class ManagerService {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ clear: true }),
 		});
+	}
+
+	/** 开源化：环境自检（llama-server / models / GPU）。挂载时拉一次，驱动顶部指引条。 */
+	static envCheck(): Promise<ManagerEnvCheck> {
+		return managerFetch<ManagerEnvCheck>('/api/env-check');
 	}
 
 	/**

@@ -67,3 +67,12 @@ export { default as CollapsibleSection } from './CollapsibleSection.svelte';
  * `class` and `style` props and inherits color via `currentColor`.
  */
 export { default as Logo } from './Logo.svelte';
+
+/**
+ * **EnvCheckBanner** - Environment self-check guidance banner
+ *
+ * Fetches manager `/api/env-check` on mount and renders a dismissible banner
+ * when the environment is incomplete (llama-server missing / no models /
+ * NVIDIA tools absent). Hidden entirely when everything passes.
+ */
+export { default as EnvCheckBanner } from './EnvCheckBanner.svelte';

@@ -4,7 +4,7 @@
 	import { goto } from '$app/navigation';
 	import { base } from '$app/paths';
 	import { page } from '$app/state';
-	import { SidebarNavigation } from '$lib/components/app';
+	import { EnvCheckBanner, SidebarNavigation } from '$lib/components/app';
 	import { PwaMetaTags, PwaRefreshAlert } from '$lib/components/pwa';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import {
@@ -389,6 +389,7 @@
 		/>
 
 		<div class="flex-1">
+			<EnvCheckBanner />
 			{@render children?.()}
 		</div>
 	</div>

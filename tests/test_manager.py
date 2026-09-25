@@ -315,5 +315,46 @@ class TestModelTrash(unittest.TestCase):
         self.assertEqual(self.meta.trash_list()["items"], [])
 
 
+class TestEnvCheck(unittest.TestCase):
+    """环境自检：致命项（llama-server）与警告项（models/GPU）的判定。"""
+
+    def setUp(self):
+        import manager_pkg.envcheck as envcheck
+        self.envcheck = envcheck
+        self.tmp = tempfile.mkdtemp()
+        self._orig = (envcheck.LLAMA_SERVER, envcheck.MODEL_DIRS)
+        envcheck.LLAMA_SERVER = os.path.join(self.tmp, "bin", "llama-server.exe")
+        envcheck.MODEL_DIRS = [os.path.join(self.tmp, "models")]
+
+    def tearDown(self):
+        self.envcheck.LLAMA_SERVER, self.envcheck.MODEL_DIRS = self._orig
+
+    def test_all_green_when_env_ready(self):
+        os.makedirs(os.path.dirname(self.envcheck.LLAMA_SERVER), exist_ok=True)
+        open(self.envcheck.LLAMA_SERVER, "wb").write(b"x")
+        os.makedirs(self.envcheck.MODEL_DIRS[0], exist_ok=True)
+        open(os.path.join(self.envcheck.MODEL_DIRS[0], "m.gguf"), "wb").write(b"x")
+        r = self.envcheck.env_check()
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["llama_server"]["ok"])
+        self.assertTrue(r["models"]["ok"])
+        self.assertEqual(r["models"]["count"], 1)
+
+    def test_missing_server_is_fatal_and_models_empty_warns(self):
+        r = self.envcheck.env_check()
+        self.assertFalse(r["ok"])
+        self.assertFalse(r["llama_server"]["ok"])
+        self.assertFalse(r["models"]["ok"])
+        self.assertEqual(r["models"]["count"], 0)
+        # gpu 缺失不算致命（无 NVIDIA 卡也能用核心功能）
+        self.assertIn("ok", r["gpu"])
+
+    def test_never_raises(self):
+        # 全部指向不存在的路径也不该抛异常
+        r = self.envcheck.env_check()
+        self.assertIsInstance(r, dict)
+        self.assertIn("llama_server", r)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

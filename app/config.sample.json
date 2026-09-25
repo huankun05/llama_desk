@@ -1,0 +1,46 @@
+{
+  "_说明": "llama-desk 配置样板。用法：复制本文件为同目录下的 config.json，把下面 6 个路径改成你机器上的真实绝对路径（正斜杠 /），保存后重启应用。注意：请使用绝对路径而不是相对路径（外壳按当前工作目录解析相对路径，不可靠）。端口改了也能用，但 llama_port 与 manager 端口需保持一致的自检才能全绿；改端口会清空界面上的本地数据（localStorage 按 origin 隔离），慎重。",
+
+  "llama_server": "C:/llama-desk/bin/llama-server.exe",
+  "webui_dir": "C:/llama-desk/webui",
+  "python": "python",
+  "manager_script": "C:/llama-desk/webui/manager.py",
+  "log_dir": "C:/llama-desk/app/logs",
+  "webview_data_dir": "C:/llama-desk/app/.webview",
+
+  "host": "127.0.0.1",
+  "llama_port": 8080,
+  "manager_port": 8090,
+
+  "start_manager": true,
+  "close_to_tray": true,
+  "ready_timeout_secs": 180,
+  "window_timeout_secs": 25,
+  "browser_fallback": true,
+  "auto_update_llama_cpp": false,
+  "open_path": "/#/",
+  "window_width": 1280.0,
+  "window_height": 820.0,
+
+  "instance": {
+    "autostart": false,
+    "model": "C:/llama-desk/models/my-model-Q4_K_M.gguf",
+    "alias": "my-model",
+    "ctx": 32768,
+    "ctk": "",
+    "ctv": "",
+    "np": 4,
+    "kv_unified": true,
+    "ngl": 99,
+    "flash_attn": "on",
+    "threads": 8,
+    "batch": 2048,
+    "ubatch": 512,
+    "temp": 0.6,
+    "top_p": 0.9,
+    "min_p": 0.05,
+    "repeat_penalty": 1.05,
+    "n_predict": 2048,
+    "no_reasoning_preserve": true
+  }
+}
