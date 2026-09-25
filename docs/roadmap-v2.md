@@ -912,6 +912,22 @@ webui/manager_pkg/
 >   回归 35+12+16=**63/63** + `probe_size_unknown` 8/8；CJK 0 处、dict_dedupe 0 撞键。
 >   ⚠️ **manager.py 改动需重启才生效**（用户侧双击 `webui\restart-manager.bat`）。
 
+> **第 4 批·H2 收尾：拆 `manager.py`（3743 行）→ `manager_pkg/` 包 + 3 行 shim（9-25）**：
+> - **结构**：`webui/manager.py` 改为 3 行 shim（`from manager_pkg.__main__ import main; main()`）；
+>   拆出 `manager_pkg/{__main__,state,gguf,scan,fit,instances,metrics,downloads,http_api}.py`。
+>   `config.json` 不改、Tauri 外壳不重建、`/api/ping` 的 stale 语义不变。
+> - **切分原则**：`state.py` 收口所有模块级可变状态（instances/events/缓存/全局配置/路径）；
+>   跨切片环依赖（fit↔instances、instances↔scan、metrics↔instances）走函数内延迟 `import`；
+>   `_HF_SSL_CTX` 从 downloads 上移到 `state`（漏了一次，pyflakes + 真机 `hf_search` 抓出补回）；
+>   `WEBUI_DIR` 在包内改取 `Path(__file__).resolve().parents[1]`（否则指向 `manager_pkg/` 导致 fit 缓存/路径错位）。
+> - **安全网**：拆包前先补 `tests/run_tests.py`（纯 unittest，25 例，覆盖可离线验证的纯逻辑），
+>   切分后基线 25/25 不破；`pyflakes` 抓未定义名（8 处，含 2 处环导入已改函数内延迟导入）；
+>   `py_compile` 全过。
+> - **验收**：真机全链路——`/api/ping`(stale:false) / `/api/models`(18 个) / `/api/bench-light`(28.92) /
+>   `/api/gpu-history`(采样+归因 idle 正确)；UI 探针回归 `gpu_health 9/9` + `size_unknown 8/8` +
+>   `download 28/28` + `nav 16/16` + `settings 12/12` + `launch_merge 35/35` 全绿。
+> - **可复现**：切分脚本留在 `tools/_oneoff/split_manager_pkg.py`（改边界重跑，不手改生成文件）。
+
 ### 第 3 批（2 天 · 可观测性）
 9. **F GPU 健康 / 归因面板**
 10. **E 一键基准 + 留档**（轻量档先上，严格档后补）
@@ -919,7 +935,7 @@ webui/manager_pkg/
 > 做完这批：**"慢"能被分类**（机器限额 / 配置不对 / 正常），而不是靠猜。
 
 ### 第 4 批（按需 · 结构与差异化）
-11. **H2 拆 `manager.py` 包**（在动后端之前先拆，之后写代码更舒服）
+11. **H2 拆 `manager.py` 包** ✅ 已完成（9-25，见上方收尾记录）
 12. **G 量化工具箱**（perplexity 对比是重点）
 13. 模型标签 / 备注 / 收藏 / **删除**（破坏性，见问题 7）
 
