@@ -151,6 +151,9 @@ ALLOW = {
     # ⚠️ 带尾部反斜杠那条**不能**写成 r'...\'（raw 串不能以单反斜杠结尾，语法错误）。
     r'D:\llama\backups',
     'D:\\llama\\backups\\',
+    # 「关于应用」分区：产品名与版本前缀（v0.1.0 的前导 v）不翻
+    'llama-desk.exe',
+    'v',
 }
 
 allf = []

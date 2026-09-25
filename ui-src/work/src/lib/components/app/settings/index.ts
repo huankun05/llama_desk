@@ -52,6 +52,7 @@ export { default as SettingsChatImportExportTab } from './SettingsChat/SettingsC
  * Lists / creates / restores / deletes backups of launch presets, settings and conversations.
  */
 export { default as SettingsChatBackupTab } from './SettingsChat/SettingsChatBackupTab.svelte';
+export { default as SettingsChatAboutTab } from './SettingsChat/SettingsChatAboutTab.svelte';
 
 /**
  * Section wrapper for import/export sections. Displays a title, description,

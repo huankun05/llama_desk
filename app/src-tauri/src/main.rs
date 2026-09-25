@@ -12,10 +12,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_notification::NotificationExt;
 
 use config::AppConfig;
 use supervisor::Supervisor;
@@ -53,6 +54,136 @@ fn epoch_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// ============ 应用级设置 / llama.cpp 更新（设置页「关于应用」经 IPC 调用） ============
+//
+// 背景：托盘原本塞了 8 项菜单（含更新三件套 / 重启服务 / 打开日志），太挤。
+// 这些操作全部搬进 WebUI 设置页的「About app」分区，经下面的 command 通道调回来；
+// 托盘只保留「显示窗口 / 在浏览器打开 / 退出」三件事。
+
+/// 系统通知（Windows Toast）。更新开始/结束时即使窗口藏在托盘也能让用户看到。
+fn notify(app: &AppHandle, title: &str, body: &str) {
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+/// 给前端发更新进度事件（设置页「关于应用」订阅 `app-update`）。
+fn emit_update(app: &AppHandle, stage: &str, message: &str) {
+    let _ = app.emit(
+        "app-update",
+        serde_json::json!({ "stage": stage, "message": message }),
+    );
+}
+
+#[tauri::command]
+async fn app_info(app: AppHandle) -> Result<serde_json::Value, String> {
+    let cfg = app.state::<AppConfig>().inner().clone();
+    let v = tauri::async_runtime::spawn_blocking(move || {
+        let bin_dir = std::path::Path::new(&cfg.llama_server)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        serde_json::json!({
+            // 外壳自身版本（tauri.conf.json 的 version）
+            "app_version": env!("CARGO_PKG_VERSION"),
+            // llama.cpp 构建号（跑 llama-server --version 解析；读不到为 null）
+            "llama_build": updater::current_build(&cfg),
+            "auto_update": cfg.auto_update_llama_cpp,
+            "bin_dir": bin_dir.to_string_lossy(),
+            // 更新备份目录：bin 同级的 llamacpp_backup_<时间戳>/（最多留 3 份）
+            "backup_dir": bin_dir
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            // 更新包的下载落点（装完即删）
+            "download_dir": std::env::temp_dir()
+                .join("llama-desk-update")
+                .to_string_lossy(),
+            "log_dir": cfg.log_dir,
+        })
+    })
+    .await
+    .map_err(|e| format!("app_info 失败：{e}"))?;
+    Ok(v)
+}
+
+#[tauri::command]
+async fn app_check_update(app: AppHandle) -> Result<String, String> {
+    let cfg = app.state::<AppConfig>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || updater::check_status(&cfg))
+        .await
+        .map_err(|e| format!("检查更新失败：{e}"))
+}
+
+/// 立即更新：独立线程跑（下载+解压可能几分钟），进度经事件+系统通知回报，UI 不阻塞。
+#[tauri::command]
+async fn app_update_now(app: AppHandle) -> Result<String, String> {
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let cfg = app2.state::<AppConfig>().inner().clone();
+        let sup = app2.state::<Supervisor>().inner().clone();
+        notify(
+            &app2,
+            "llama-desk",
+            "正在更新 llama.cpp（自动备份旧版本，完成后通知你）",
+        );
+        emit_update(&app2, "running", "Updating llama.cpp…");
+        let msg = updater::manual_update(&cfg, &sup);
+        trace(&cfg.log_dir, &format!("手动更新：{msg}"));
+        eprintln!("[llama-desk] 手动更新：{msg}");
+        let ok = !msg.starts_with("更新失败");
+        notify(
+            &app2,
+            if ok { "llama.cpp 更新完成" } else { "llama.cpp 更新失败" },
+            &msg,
+        );
+        emit_update(&app2, if ok { "done" } else { "error" }, &msg);
+    });
+    Ok("started".into())
+}
+
+/// 自动更新开关：写回 config.json（与托盘时代同一份配置，重启应用生效到启动期自动更新）。
+#[tauri::command]
+async fn app_set_auto_update(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    let mut cfg = app.state::<AppConfig>().inner().clone();
+    cfg.auto_update_llama_cpp = enabled;
+    cfg.save()?;
+    Ok(enabled)
+}
+
+#[tauri::command]
+fn app_open_logs(app: AppHandle) {
+    let dir = app.state::<AppConfig>().inner().log_dir.clone();
+    supervisor::open_dir(&dir);
+}
+
+/// 重启本地服务（原托盘「重启本地服务」搬到这里）：只动自己拉起的 llama-server，
+/// 端口被外部进程占用时跳过，完成后刷新界面。
+#[tauri::command]
+fn app_restart_llama(app: AppHandle) {
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let sup = app2.state::<Supervisor>().inner().clone();
+        let cfg = app2.state::<AppConfig>().inner().clone();
+        let mut start = true;
+        if !sup.llama_owned_alive() && sup.llama_port_open() {
+            eprintln!("[llama-desk] :{} 由外部进程占用，跳过重启", cfg.llama_port);
+            start = false;
+        }
+        if start {
+            sup.kill_llama();
+            std::thread::sleep(Duration::from_millis(700));
+            match sup.spawn_llama() {
+                Ok(pid) => eprintln!("[llama-desk] 重启 llama-server PID {pid}"),
+                Err(e) => eprintln!("[llama-desk] 重启失败：{e}"),
+            }
+            sup.wait_port(cfg.llama_port, Duration::from_secs(180));
+            if let Some(w) = app2.get_webview_window(WIN) {
+                let _ = w.eval("location.reload()");
+            }
+        }
+        show_main(&app2);
+    });
 }
 
 /// 无窗口自检：拉起服务 -> 等端口就绪 -> 打印结果 -> 停掉自己拉起的服务。
@@ -143,7 +274,16 @@ fn main() {
     let cfg_setup = cfg.clone();
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ui_ready])
+        .invoke_handler(tauri::generate_handler![
+            ui_ready,
+            app_info,
+            app_check_update,
+            app_update_now,
+            app_set_auto_update,
+            app_open_logs,
+            app_restart_llama
+        ])
+        .plugin(tauri_plugin_notification::init())
         // 第二实例只负责把已有窗口叫到前台
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main(app);
@@ -424,40 +564,13 @@ fn boot(app: AppHandle, browser_fallback: bool) {
 }
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    let lazy = !app.state::<AppConfig>().inner().instance.autostart;
+    // 托盘刻意只留三件事（重启服务 / 日志 / llama.cpp 更新都搬进了
+    // 设置页「About app」—— 那里有进度反馈和说明，比一行托盘菜单更清楚）。
     let i_show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
     let i_browser = MenuItem::with_id(app, "browser", "在浏览器中打开", true, None::<&str>)?;
-    // 懒加载模式下 :8080 上平时只是一个零模型哨兵，说"重启 llama-server"会让人
-    // 以为模型也跟着重启；"重启本地服务"才准确（模型由界面按需加载）。
-    let i_restart = MenuItem::with_id(
-        app,
-        "restart",
-        if lazy { "重启本地服务" } else { "重启 llama-server" },
-        true,
-        None::<&str>,
-    )?;
-    let i_logs = MenuItem::with_id(app, "logs", "打开日志目录", true, None::<&str>)?;
-    let i_check = MenuItem::with_id(app, "check_update", "检查 llama.cpp 更新", true, None::<&str>)?;
-    let i_update = MenuItem::with_id(app, "update_now", "更新 llama.cpp（手动）", true, None::<&str>)?;
-    let i_auto = CheckMenuItem::with_id(
-        app,
-        "auto_update",
-        "自动更新 llama.cpp",
-        app.state::<AppConfig>().inner().auto_update_llama_cpp,
-        true,
-        None::<&str>,
-    )?;
-    let sep1 = PredefinedMenuItem::separator(app)?;
-    let sep2 = PredefinedMenuItem::separator(app)?;
-    let sep3 = PredefinedMenuItem::separator(app)?;
     let i_quit = MenuItem::with_id(app, "quit", "退出（停止服务）", true, None::<&str>)?;
 
-    let menu = Menu::with_items(
-        app,
-        &[
-            &i_show, &i_browser, &sep1, &i_restart, &i_check, &i_update, &i_auto, &sep2, &i_logs, &sep3, &i_quit,
-        ],
-    )?;
+    let menu = Menu::with_items(app, &[&i_show, &i_browser, &i_quit])?;
 
     let mut builder = TrayIconBuilder::new()
         .tooltip("llama.cpp 本地服务")
@@ -468,71 +581,6 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             "browser" => {
                 let url = app.state::<AppConfig>().inner().webui_url();
                 supervisor::open_external(&url);
-            }
-            "check_update" => {
-                let app2 = app.clone();
-                std::thread::spawn(move || {
-                    let cfg = app2.state::<AppConfig>().inner().clone();
-                    let msg = updater::check_status(&cfg);
-                    trace(&cfg.log_dir, &format!("检查更新：{msg}"));
-                    eprintln!("[llama-desk] {msg}");
-                });
-            }
-            "update_now" => {
-                let app2 = app.clone();
-                std::thread::spawn(move || {
-                    let sup = app2.state::<Supervisor>().inner().clone();
-                    let cfg = app2.state::<AppConfig>().inner().clone();
-                    let msg = updater::manual_update(&cfg, &sup);
-                    trace(&cfg.log_dir, &format!("手动更新：{msg}"));
-                    eprintln!("[llama-desk] {msg}");
-                    if let Some(w) = app2.get_webview_window(WIN) {
-                        let _ = w.eval("location.reload()");
-                    }
-                });
-            }
-            "auto_update" => {
-                let app2 = app.clone();
-                let mut cfg = app2.state::<AppConfig>().inner().clone();
-                let new = !cfg.auto_update_llama_cpp;
-                cfg.auto_update_llama_cpp = new;
-                if let Err(e) = cfg.save() {
-                    eprintln!("[llama-desk] 保存配置失败：{e}");
-                } else {
-                    eprintln!(
-                        "[llama-desk] 自动更新已{}（重启应用后生效）",
-                        if new { "开启" } else { "关闭" }
-                    );
-                }
-            }
-            "restart" => {
-                let app2 = app.clone();
-                std::thread::spawn(move || {
-                    let sup = app2.state::<Supervisor>().inner().clone();
-                    let cfg = app2.state::<AppConfig>().inner().clone();
-                    let mut start = true;
-                    if !sup.llama_owned_alive() && sup.llama_port_open() {
-                        eprintln!("[llama-desk] :{} 由外部进程占用，跳过重启", cfg.llama_port);
-                        start = false;
-                    }
-                    if start {
-                        sup.kill_llama();
-                        std::thread::sleep(Duration::from_millis(700));
-                        match sup.spawn_llama() {
-                            Ok(pid) => eprintln!("[llama-desk] 重启 llama-server PID {pid}"),
-                            Err(e) => eprintln!("[llama-desk] 重启失败：{e}"),
-                        }
-                        sup.wait_port(cfg.llama_port, Duration::from_secs(180));
-                        if let Some(w) = app2.get_webview_window(WIN) {
-                            let _ = w.eval("location.reload()");
-                        }
-                    }
-                    show_main(&app2);
-                });
-            }
-            "logs" => {
-                let dir = app.state::<AppConfig>().inner().log_dir.clone();
-                supervisor::open_dir(&dir);
             }
             "quit" => app.exit(0),
             _ => {}

@@ -1113,3 +1113,22 @@ webui/manager_pkg/
   新会话全新 ✓）；部署 `overlay.js?v=109`。
 - **遗留**：探针场景 9 在 `models/from-hf/Qwen_Qwen2.5-0.5B-Instruct-GGUF` 积了
   1.6GB 真实模型残留（多轮探针累积）——留给用户在 Manage 弹窗里删，顺便验证回收站删除。
+
+**「关于应用」分区 + 托盘精简 ✅（9-25 傍晚，用户反馈「设置里没有应用自身的设置」）**：
+- **诉求**：设置页全是 llama 的参数，应用自己的东西（自动更新开关/手动更新/更新提示/下载文件位置） nowhere；托盘 8 项太挤。
+- **外壳（Rust，cargo check 0 错 0 警，需用户重建 exe）**：
+  - 托盘精简为 **3 项**：显示窗口 / 在浏览器打开 / 退出；重启服务、日志、更新三件套搬进设置页。
+  - 新增 IPC：`app_info`（外壳版本/llama.cpp build/开关/各目录）、`app_check_update`、
+    `app_update_now`（独立线程，事件+系统通知回报）、`app_set_auto_update`（写回 config.json）、
+    `app_open_logs`、`app_restart_llama`（原托盘重启逻辑平移）。
+  - 新增 `tauri-plugin-notification`：更新开始/完成/失败发 **Windows 系统通知**
+    （窗口藏在托盘也看得到）；capabilities 加 `notification:default`。
+- **前端**：`@tauri-apps/api@2.11.1`（npm install 撞沙箱 safe-delete → 手动 tarball 解包 +
+  package.json 登记）；新 `shell.service.ts`（`__TAURI_INTERNALS__` 探测，浏览器模式全降级）；
+  新 `SettingsChatAboutTab`（版本信息组 / 更新组：自动更新开关+检查+安装+进行中横幅 /
+  服务与日志组：重启+打开日志）；浏览器模式显示降级说明。DICT +22 词条，
+  dict_audit 白名单加 `llama-desk.exe`/`v`。
+- **验收**：新 `probe_about_tab.mjs` **5/5**（侧栏入口/分区切换/降级说明/无更新控件/无 JS 错）；
+  probe_settings_page 12/12、probe_nav 16/16 回归全绿；svelte-check 0 错；部署 `overlay.js?v=110`。
+- ⚠️ **需用户重建外壳**：`cd app/src-tauri && cargo build --release`（或 app\build.bat），
+  重建后真机验证：设置 → 关于应用 → 检查更新/开关/系统通知。

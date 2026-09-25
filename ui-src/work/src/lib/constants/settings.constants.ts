@@ -7,6 +7,7 @@ import {
 	Code,
 	Database,
 	Funnel,
+	Info,
 	ListRestart,
 	Monitor,
 	Moon,
@@ -39,7 +40,8 @@ export const SETTINGS_SECTIONS = {
 	PERFORMANCE: { slug: 'performance', title: 'Performance' },
 	SAMPLING_PENALTIES: { slug: 'sampling-penalties', title: 'Sampling & Penalties' },
 	TOOLS: { slug: 'tools', title: 'Tools' },
-	BACKUP: { slug: 'backup', title: 'Backup' }
+	BACKUP: { slug: 'backup', title: 'Backup' },
+	ABOUT: { slug: 'about', title: 'About app' }
 } as const;
 
 export const SETTINGS_SECTION_SLUGS = {
@@ -52,7 +54,8 @@ export const SETTINGS_SECTION_SLUGS = {
 	PERFORMANCE: SETTINGS_SECTIONS.PERFORMANCE.slug,
 	SAMPLING_PENALTIES: SETTINGS_SECTIONS.SAMPLING_PENALTIES.slug,
 	TOOLS: SETTINGS_SECTIONS.TOOLS.slug,
-	BACKUP: SETTINGS_SECTIONS.BACKUP.slug
+	BACKUP: SETTINGS_SECTIONS.BACKUP.slug,
+	ABOUT: SETTINGS_SECTIONS.ABOUT.slug
 } as const;
 
 export const SETTINGS_SECTION_TITLES = {
@@ -65,7 +68,8 @@ export const SETTINGS_SECTION_TITLES = {
 	PERFORMANCE: SETTINGS_SECTIONS.PERFORMANCE.title,
 	SAMPLING_PENALTIES: SETTINGS_SECTIONS.SAMPLING_PENALTIES.title,
 	TOOLS: SETTINGS_SECTIONS.TOOLS.title,
-	BACKUP: SETTINGS_SECTIONS.BACKUP.title
+	BACKUP: SETTINGS_SECTIONS.BACKUP.title,
+	ABOUT: SETTINGS_SECTIONS.ABOUT.title
 } as const;
 
 export const SETTINGS_REGISTRY: SettingsSectionEntry[] = [
@@ -732,6 +736,15 @@ export const SETTINGS_REGISTRY: SettingsSectionEntry[] = [
 		],
 		slug: SETTINGS_SECTION_SLUGS.PERFORMANCE,
 		title: SETTINGS_SECTION_TITLES.PERFORMANCE
+	},
+	// About app — 整栏由 SettingsChatAboutTab 渲染（版本信息 / llama.cpp 更新 / 服务与日志）。
+	// 原托盘的更新三件套、重启服务、打开日志都搬进了这里；字段全走桌面外壳 IPC，
+	// 不进 localStorage —— settings:[] 与 Tools/MCP 同款「自定义整栏」。
+	{
+		icon: Info,
+		settings: [],
+		slug: SETTINGS_SECTION_SLUGS.ABOUT,
+		title: SETTINGS_SECTION_TITLES.ABOUT
 	}
 ];
 

@@ -2,6 +2,7 @@
 	import { RefreshCw } from '@lucide/svelte';
 	import CollapsibleSection from '$lib/components/app/misc/CollapsibleSection.svelte';
 	import {
+		SettingsChatAboutTab,
 		SettingsChatBackupTab,
 		SettingsChatDesktopSidebar,
 		SettingsChatFields,
@@ -195,6 +196,8 @@
 							<SettingsChatImportExportTab />
 						{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.BACKUP}
 							<SettingsChatBackupTab />
+						{:else if currentSection.slug === SETTINGS_SECTION_SLUGS.ABOUT}
+							<SettingsChatAboutTab />
 						{:else if currentSection.fields}
 							<div class="space-y-6">
 								<SettingsChatFields

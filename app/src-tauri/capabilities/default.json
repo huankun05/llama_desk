@@ -4,6 +4,7 @@
   "description": "llama-desk 默认能力集（界面由 llama-server 提供；本地备份由 WebUI 通过浏览器 File System Access API 直接落盘，不经过 IPC）",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "notification:default"
   ]
 }
