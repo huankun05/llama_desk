@@ -537,6 +537,7 @@
     'Select all': '全选',
     'Select an available model:': '选择一个可用模型：',
     'Select model': '选择模型',
+    'Model selector': '模型选择器',
     'Selected model is not available': '所选模型不可用',
     'Send': '发送',
     'Send immediately': '立即发送',

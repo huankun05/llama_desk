@@ -107,7 +107,7 @@ await page.screenshot({ path: `${OUT}/A01-mounted.png`, fullPage: false });
 // B. 对话框深验：需要 :8080 上有已加载模型
 // ---------------------------------------------------------------------------
 say('');
-say('B. 对话框深验（打开模型信息 → Manage 分节）');
+say('B. 对话框深验（下拉 ⋯ 菜单 → Manage → 弹窗分节）');
 
 let loadedModel = null;
 try {
@@ -122,45 +122,57 @@ try {
 }
 
 if (!loadedModel) {
-	say('  ⚠️ 没有已加载的模型（沙箱无可持续 GPU 运行时）。');
-	say('  跳过对话框交互；B 部分请在真机（已加载模型）上执行本探针。');
+	say('  ⚠️ 没有已加载的模型。请先在应用里装载任一模型再跑本探针（B 部分需要）。');
 } else {
-	say(`  检测到已加载模型: ${loadedModel.model || loadedModel.name}`);
-	// 打开模型选择器下拉（触发按钮 = aside 里带模型名的按钮）
-	const trigger = page.locator('aside button', { hasText: /./ }).first();
-	await trigger.click().catch(() => {});
-	await page.waitForTimeout(700);
-	// 找信息按钮（Info 图标，tooltip "Model information"）
-	const infoBtn = page
-		.locator('button[title="Model information"], [aria-label="Model information"]')
-		.first();
-	if (await infoBtn.count()) {
-		await infoBtn.click();
-		await page.waitForTimeout(900);
-		const dt = await bodyText();
-		check('对话框出现 Manage 分节', /Manage/i.test(dt), dt.slice(0, 80));
-		check('对话框含 Favorite', /Favorite|Favorited|收藏/.test(dt));
-		check('对话框含 Tags', /Tags|标签/.test(dt));
-		check('对话框含 Note', /Note|备注/.test(dt));
-		check('对话框含回收站删除按钮', /Recycle Bin|回收站/.test(dt));
-		await page.screenshot({ path: `${OUT}/B01-manage-dialog.png`, fullPage: false });
-		// 点开删除校验，应看到守卫文案或确认 UI（不真删）
-		const delBtn = page.locator('button', { hasText: /Recycle Bin|回收站/ }).first();
-		if (await delBtn.count()) {
-			await delBtn.click();
-			await page.waitForTimeout(700);
-			const dt2 = await bodyText();
-			check(
-				'点删除后出现校验/确认 UI（守卫文案）',
-				/Confirm delete|Deleting|Cannot delete|Ollama mirror|Currently loaded|Hard link|Outside models|Referenced by|回收站/.test(
-					dt2
-				),
-				dt2.slice(0, 90)
-			);
-			await page.screenshot({ path: `${OUT}/B02-delete-guard.png`, fullPage: false });
-		}
+	say('  检测到已加载模型: ' + (loadedModel.model || loadedModel.name));
+
+	// 1) 打开聊天下拉（主触发按钮有稳定 aria-label）
+	const trigger = page.locator('button[aria-label="Model selector"], button[aria-label="模型选择器"]').first();
+	if (!(await trigger.count())) {
+		say('  ⚠️ 未找到 Model selector 触发按钮（产物过旧？先重新构建部署）。');
 	} else {
-		say('  ⚠️ 未找到信息按钮（可能下拉未展开或模型未真正加载）。');
+		await trigger.click();
+		await page.waitForTimeout(900);
+
+		// 2) 点第一行的 ⋯ 菜单（aria-label="Model actions"）
+		const rowActions = page.locator('li button[aria-label="Model actions"], li button[aria-label="模型操作"]').first();
+		if (!(await rowActions.count())) {
+			say('  ⚠️ 下拉里没有行内 Model actions 按钮。');
+		} else {
+			await rowActions.click();
+			await page.waitForTimeout(600);
+
+			// 3) 点「Manage」菜单项（overlay 会翻成「管理」）
+			const manageItem = page.locator('div[role="menuitem"], [role="menuitem"]', { hasText: /Manage|管理/ }).first();
+			if (!(await manageItem.count())) {
+				say('  ⚠️ 菜单里没有 Manage 项（产物过旧？）。');
+			} else {
+				await manageItem.click();
+				await page.waitForTimeout(1000);
+
+				const dt = await bodyText();
+				check('Manage 弹窗打开（含 Manage 分节）', /Manage|管理/.test(dt), dt.slice(0, 80));
+				check('弹窗含 Favorite', /Favorite|Favorited|收藏/.test(dt));
+				check('弹窗含 Tags', /Tags|标签/.test(dt));
+				check('弹窗含 Note', /Note|备注/.test(dt));
+				check('弹窗含回收站删除按钮', /Recycle Bin|回收站/.test(dt));
+				await page.screenshot({ path: `${OUT}/B01-manage-dialog.png`, fullPage: false });
+
+				// 4) 点删除 → 出现校验/确认 UI（不真删）
+				const delBtn = page.locator('button', { hasText: /Recycle Bin|回收站/ }).first();
+				if (await delBtn.count()) {
+					await delBtn.click();
+					await page.waitForTimeout(800);
+					const dt2 = await bodyText();
+					check(
+						'点删除后出现校验/确认 UI（守卫文案）',
+						/Confirm delete|Deleting|Cannot delete|Ollama mirror|Currently loaded|Hard link|Outside models|Referenced by|确认删除|正在删除|无法删除|回收站/.test(dt2),
+						dt2.slice(0, 90)
+					);
+					await page.screenshot({ path: `${OUT}/B02-delete-guard.png`, fullPage: false });
+				}
+			}
+		}
 	}
 }
 

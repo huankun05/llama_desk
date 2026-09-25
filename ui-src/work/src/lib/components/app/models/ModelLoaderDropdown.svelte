@@ -13,7 +13,8 @@
 	 */
 import ModelId from './ModelId.svelte';
 import DialogModelLaunchInfo from './DialogModelLaunchInfo.svelte';
-import { ChevronDown, EllipsisVertical, Info, Loader2, RefreshCw, RotateCw, Search } from '@lucide/svelte';
+import { DialogModelInformation } from '$lib/components/app';
+import { ChevronDown, EllipsisVertical, Info, Loader2, RefreshCw, RotateCw, Search, Tags } from '@lucide/svelte';
 import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 import { MODEL_SELECTOR_ICON } from '$lib/constants';
 import { ManagerError, ManagerService } from '$lib/services';
@@ -57,6 +58,8 @@ import { onMount } from 'svelte';
 	let menuPath = $state<string | null>(null);
 	/** 「启动配置与信息」弹窗的目标模型；null = 关闭 */
 	let infoModel = $state<ManagerModel | null>(null);
+	// Manage 弹窗（DialogModelInformation）：标签/收藏/备注/回收站删除。
+	let manageModel = $state<ManagerModel | null>(null);
 	/** 当前渲染的这一行是不是「上次使用过的模型」（模板逐行赋值） */
 	let lastUsed = $state(false);
 
@@ -506,6 +509,7 @@ import { onMount } from 'svelte';
 <div class={['relative inline-flex flex-col items-end gap-1', className]}>
 	<DropdownMenu.Root bind:open={isOpen} {onOpenChange}>
 		<DropdownMenu.Trigger
+			aria-label="Model selector"
 			class={[
 				'inline-flex max-w-[min(calc(100cqw-6.5rem),32rem)] cursor-pointer items-center gap-1.5 rounded-sm bg-background px-1.5 py-1 text-xs shadow-sm transition hover:bg-muted-foreground/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-muted-foreground/15 dark:text-secondary-foreground',
 				forceForegroundText ? 'text-foreground' : 'text-foreground',
@@ -728,11 +732,26 @@ import { onMount } from 'svelte';
 												const target = m;
 
 												menuPath = null;
+												isOpen = false; // 主下拉一并收起，否则会叠在弹窗上
 												setTimeout(() => (infoModel = target), 0);
 											}}
 										>
 											<Info class="h-3.5 w-3.5 shrink-0" />
 											<span>Launch config &amp; info</span>
+										</DropdownMenu.Item>
+										<DropdownMenu.Item
+											class="flex cursor-pointer items-center gap-2 text-xs"
+											onclick={() => {
+												// 同上：等菜单关完再开弹窗，避免焦点互抢。
+												const target = m;
+
+												menuPath = null;
+												isOpen = false;
+												setTimeout(() => (manageModel = target), 0);
+											}}
+										>
+											<Tags class="h-3.5 w-3.5 shrink-0" />
+											<span>Manage</span>
 										</DropdownMenu.Item>
 										<DropdownMenu.Item
 											class="flex cursor-pointer items-center gap-2 text-xs"
@@ -781,6 +800,15 @@ import { onMount } from 'svelte';
 		open={infoModel !== null}
 		onOpenChange={(open) => {
 			if (!open) infoModel = null;
+		}}
+	/>
+
+	<!-- Manage 弹窗：传绝对路径作 modelId，DialogModelInformation 按路径定位模型。 -->
+	<DialogModelInformation
+		modelId={manageModel?.path ?? null}
+		open={manageModel !== null}
+		onOpenChange={(open) => {
+			if (!open) manageModel = null;
 		}}
 	/>
 </div>
