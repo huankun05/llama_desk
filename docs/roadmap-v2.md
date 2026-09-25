@@ -949,8 +949,9 @@ webui/manager_pkg/
 ### 第 4 批（按需 · 结构与差异化）
 11. **H2 拆 `manager.py` 包** ✅ 已完成（9-25，见上方收尾记录）
 12. **G 量化工具箱**（perplexity 对比是重点）—— 经评估**暂不推**：你不自量化、下载器已解决"装不装得下"、perplexity 一年用两三次，性价比低
-13. **模型标签 / 备注 / 收藏 / 回收站删除** ✅ 已完成（9-25，见下方收尾记录；对应问题 7 的「②谨慎版」）
+13. **模型标签 / 备注 / 收藏 / 回收站删除** ✅ 已完成并**真机闭环**（9-25，见下方收尾记录；对应问题 7 的「②谨慎版」）
     - **③ 收官增强（9-25 下午）**：① 模型选择器**按标签/收藏筛选**（下拉里新增筛选行：★ 仅看收藏 + 标签 chip；无收藏无标签时自动隐藏；meta 缺 path 时按「去扩展名文件名」弱匹配）——顺手修了一个真 bug：`ModelOption` 一直没带 `path`，弹窗 Manage 区的 meta 读写会静默失效，现在 build 时透传 + manager `/api/models` 兜底解析；② `.trash` 降级回收站的列出/清空端点（`GET/POST /api/model-trash`，弹窗里仅有内容时显示；逐条容错）；③ 删除软警告**列出具体方案名**（不再只报数量）。tests 35/35。
+    - **Manage 入口缺口修复（9-25，`f6f7ecb`）**：真机跑 `probe_model_meta.mjs` 抓出集成缺口——生产聊天下拉是 `ModelLoaderDropdown`，其 ⋯ 菜单只有「Launch config & info」，Manage 分节所在的 `DialogModelInformation` **在主流程无入口**。修复：⋯ 菜单新增「Manage」项（传绝对路径打开弹窗）；菜单项点击后收起主下拉（否则叠在弹窗上）；主触发加 `aria-label="Model selector"`。探针 B 部分重写为真实交互路径并兼容 overlay 翻译后的中文 aria-label（⚠️ overlay 连 aria-label 一起翻，Playwright 选择器要中英文都匹配）。沙箱 + 真机各 10/10 全绿。
 
 ---
 
