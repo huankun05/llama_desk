@@ -281,5 +281,39 @@ class TestModelDeleteCheck(unittest.TestCase):
             instances.clear()
 
 
+class TestModelTrash(unittest.TestCase):
+    """降级回收站目录（models/.trash）的列出与清空。"""
+
+    def setUp(self):
+        import manager_pkg.meta as meta
+        self.meta = meta
+        self.tmp = tempfile.mkdtemp()
+        self.meta.MODELS_ROOT = os.path.join(self.tmp, "models")
+        # TRASH_DIR 在 import 时由 MODELS_ROOT 推导，测试里显式重指
+        self.meta.TRASH_DIR = os.path.join(self.meta.MODELS_ROOT, ".trash")
+
+    def _put(self, name, size=1024):
+        os.makedirs(self.meta.TRASH_DIR, exist_ok=True)
+        fp = os.path.join(self.meta.TRASH_DIR, name)
+        open(fp, "wb").write(b"x" * size)
+        return fp
+
+    def test_list_empty_when_absent(self):
+        r = self.meta.trash_list()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["items"], [])
+
+    def test_list_and_clear(self):
+        self._put("a.gguf", 2048)
+        self._put("b.gguf", 1024)
+        r = self.meta.trash_list()
+        self.assertEqual(len(r["items"]), 2)
+        self.assertEqual(r["total"], 3072)
+        c = self.meta.trash_clear()
+        self.assertTrue(c["ok"])
+        self.assertEqual(c["removed"], 2)
+        self.assertEqual(self.meta.trash_list()["items"], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

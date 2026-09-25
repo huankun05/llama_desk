@@ -18,6 +18,21 @@ export interface GroupedModelOptions {
 	available: OrgGroup[];
 }
 
+/**
+ * 模型文件的「对账键」：取文件名（兼容 \ / 两种分隔符）、去掉扩展名、转小写。
+ *
+ * 用途：manager 的 meta（标签/收藏）以绝对路径为 key，而前端模型列表项可能
+ * 只有显示名 / 模型 id —— 直接全路径对不上（大小写、`..\` 段、正反斜杠），
+ * 用「去扩展名的文件名」做弱匹配最稳；同名文件在不同目录会共用一份 meta，
+ * 属可接受的罕见退化。
+ */
+export function modelFileKey(pathOrName: string | null | undefined): string {
+	const segs = (pathOrName ?? '').replace(/\\/g, '/').split('/');
+	const base = segs[segs.length - 1] ?? '';
+
+	return base.replace(/\.[^.]+$/, '').toLowerCase();
+}
+
 function matchesModality(option: ModelOption, term: string): boolean {
 	const modalities = option.modalities;
 

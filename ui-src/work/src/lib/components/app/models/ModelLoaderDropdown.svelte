@@ -17,8 +17,9 @@ import { ChevronDown, EllipsisVertical, Info, Loader2, RefreshCw, RotateCw, Sear
 import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 import { MODEL_SELECTOR_ICON } from '$lib/constants';
 import { ManagerError, ManagerService } from '$lib/services';
-import type { ManagerModel } from '$lib/services';
+import type { ManagerModel, ManagerModelMeta } from '$lib/services';
 import { estimateModelFit, fitBadgeDetail } from '$lib/utils/model-fit';
+import { modelFileKey } from './utils';
 import type { ModelFitBadge } from '$lib/utils/model-fit';
 import {
 	clampConfigForModel,
@@ -68,6 +69,35 @@ import { onMount } from 'svelte';
 	let phaseDetail = $state('');
 	let highlightedPath = $state<string | null>(null);
 	let searchEl = $state<HTMLInputElement | null>(null);
+
+	// ---------- ③ 标签/收藏筛选（meta 来自 manager，:8080 列表本身就是 manager 给的） ----------
+	let metaMap = $state<Record<string, ManagerModelMeta>>({});
+	let favOnly = $state(false);
+	let tagFilter = $state<string | null>(null);
+
+	/** 全部已用标签（去重排序） */
+	const metaTags = $derived.by(() => {
+		const set = new Set<string>();
+		for (const v of Object.values(metaMap)) for (const t of v.tags ?? []) set.add(t);
+		return [...set].sort((a, b) => a.localeCompare(b));
+	});
+
+	/** 没有任何收藏/标签时隐藏筛选行，不给列表加噪音 */
+	const hasMetaFilters = $derived.by(() => {
+		if (metaTags.length > 0) return true;
+		for (const v of Object.values(metaMap)) if (v.favorite) return true;
+		return false;
+	});
+
+	/** 一个磁盘模型对应的用户 meta（按「去扩展名文件名」弱匹配，见 utils.modelFileKey）。 */
+	function metaFor(m: ManagerModel): ManagerModelMeta {
+		const key = modelFileKey(m.path || m.name);
+		if (!key) return {};
+		for (const [k, v] of Object.entries(metaMap)) {
+			if (modelFileKey(k) === key) return v;
+		}
+		return {};
+	}
 
 	// llama-server 就在当前页面的端口上（WebUI 由它自己服务），所以端口取自 location
 	const llamaPort = $derived(Number(location?.port) || 8080);
@@ -197,12 +227,19 @@ import { onMount } from 'svelte';
 
 	const filtered = $derived.by(() => {
 		const q = query.trim().toLowerCase();
+		const needMeta = favOnly || tagFilter !== null;
 
-		if (!q) return models;
-
-		return models.filter(
-			(m) => m.name.toLowerCase().includes(q) || m.path.toLowerCase().includes(q)
-		);
+		return models.filter((m) => {
+			if (q && !(m.name.toLowerCase().includes(q) || m.path.toLowerCase().includes(q))) {
+				return false;
+			}
+			if (needMeta) {
+				const meta = metaFor(m);
+				if (favOnly && !meta.favorite) return false;
+				if (tagFilter !== null && !(meta.tags ?? []).includes(tagFilter)) return false;
+			}
+			return true;
+		});
 	});
 
 	const highlightedIndex = $derived(
@@ -223,6 +260,12 @@ import { onMount } from 'svelte';
 		} finally {
 			loading = false;
 		}
+		// meta 失败不影响主列表，筛选行会因无数据自动隐藏
+		ManagerService.modelMetaGet()
+			.then((r) => {
+				if (r?.ok) metaMap = r.meta ?? {};
+			})
+			.catch(() => {});
 	}
 
 	// ===== 显存预算与「能不能跑」徽章（路线图 §B.1 / B-L1）=====
@@ -505,6 +548,34 @@ import { onMount } from 'svelte';
 					type="search"
 				/>
 			</div>
+
+			{#if hasMetaFilters && !busy && !loadError}
+				<!-- ③ 标签/收藏筛选行：无收藏无标签时整行隐藏 -->
+				<div
+					class="flex flex-wrap items-center gap-1.5 border-b border-border/50 px-2 py-1.5"
+					data-meta-filter-row
+				>
+					<button
+						aria-pressed={favOnly}
+						class={['rounded-full border px-2 py-0.5 text-xs transition', favOnly ? 'border-amber-500 bg-amber-500/15 text-amber-500' : 'border-border text-muted-foreground hover:bg-accent']}
+						type="button"
+						onclick={() => (favOnly = !favOnly)}
+					>
+						<span class="leading-none">★</span>
+						<span class="ms-1">Favorites only</span>
+					</button>
+					{#each metaTags as tag (tag)}
+						<button
+							aria-pressed={tagFilter === tag}
+							class={['rounded-full border px-2 py-0.5 text-xs transition', tagFilter === tag ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted-foreground hover:bg-accent']}
+							type="button"
+							onclick={() => (tagFilter = tagFilter === tag ? null : tag)}
+						>
+							{tag}
+						</button>
+					{/each}
+				</div>
+			{/if}
 
 			<!-- 列表 -->
 			<div class="max-h-72 overflow-y-auto p-1">

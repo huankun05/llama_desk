@@ -381,6 +381,9 @@ class ModelsStore implements ModelPropsHost, ModelStatusHost {
 				description: details?.description,
 				details: details?.details,
 				id: item.id,
+				// 模型文件绝对路径：meta（标签/收藏）/ 删除守卫都要按路径对账。
+				// 旧后端不返回该字段时为 undefined，调用方需走 manager /api/models 兜底。
+				path: (item as { path?: string }).path ?? undefined,
 				meta: item.meta ?? null,
 				modalities: this.props.buildArchitectureModalities(item.architecture),
 				model: modelId,

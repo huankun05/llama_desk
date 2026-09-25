@@ -293,6 +293,30 @@
 								searchValue={ms.searchTerm}
 							>
 								<div class="models-list">
+									{#if ms.hasMetaFilters}
+										<!-- ③ 标签/收藏筛选行：meta 来自 manager，无收藏无标签时整行隐藏 -->
+										<div class="flex flex-wrap items-center gap-1.5 border-b border-border px-2 py-1.5" data-meta-filter-row>
+											<button
+												aria-pressed={ms.metaFavOnly}
+												class={['rounded-full border px-2 py-0.5 text-xs transition', ms.metaFavOnly ? 'border-amber-500 bg-amber-500/15 text-amber-500' : 'border-border text-muted-foreground hover:bg-muted']}
+												type="button"
+												onclick={() => ms.setMetaFavOnly(!ms.metaFavOnly)}
+											>
+												<span class="leading-none">★</span>
+												<span class="ms-1">Favorites only</span>
+											</button>
+											{#each ms.metaTags as tag (tag)}
+												<button
+													aria-pressed={ms.metaTag === tag}
+													class={['rounded-full border px-2 py-0.5 text-xs transition', ms.metaTag === tag ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted-foreground hover:bg-muted']}
+													type="button"
+													onclick={() => ms.setMetaTag(ms.metaTag === tag ? null : tag)}
+												>
+													{tag}
+												</button>
+											{/each}
+										</div>
+									{/if}
 									{#if !ms.isCurrentModelInCache && currentModel}
 										<!-- Show unavailable model as first option (disabled) -->
 										<button

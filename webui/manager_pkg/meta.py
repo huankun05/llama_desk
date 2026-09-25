@@ -13,6 +13,7 @@ import os
 import sys
 import json
 import time
+import shutil
 import threading
 
 from .state import (MODEL_META_FILE, MODELS_ROOT, MODEL_DELETE_ALLOWED_ROOTS,
@@ -23,6 +24,9 @@ from .scan import _do_scan
 TAG_CAP = 32          # 单模型标签上限
 TAG_LEN_CAP = 64      # 单标签长度上限
 NOTE_CAP = 2000       # 备注长度上限
+
+# 回收站降级目录（仅非 Windows / SHFileOperationW 失败时使用；Windows 正常走系统回收站）
+TRASH_DIR = os.path.join(MODELS_ROOT, ".trash")
 
 
 def _norm_key(path):
@@ -214,14 +218,54 @@ def _recycle_file(path):
 
 def _move_to_trash_fallback(path):
     """降级方案：移入 models/.trash（带时间戳防碰撞），而非真删除。"""
-    trash = os.path.join(MODELS_ROOT, ".trash")
-    os.makedirs(trash, exist_ok=True)
+    os.makedirs(TRASH_DIR, exist_ok=True)
     base = os.path.basename(path)
-    dst = os.path.join(trash, "%s.%d" % (base, int(time.time() * 1000)))
+    dst = os.path.join(TRASH_DIR, "%s.%d" % (base, int(time.time() * 1000)))
     while os.path.exists(dst):
         dst += "_"
     os.replace(path, dst)
     return dst
+
+
+def trash_list():
+    """列出降级回收站目录的内容（仅 .trash；Windows 系统回收站由系统管理，不在其列）。
+
+    返回 {ok, items: [{name, size}], total}。目录不存在 = 空列表。
+    """
+    items = []
+    total = 0
+    if os.path.isdir(TRASH_DIR):
+        for name in sorted(os.listdir(TRASH_DIR)):
+            fp = os.path.join(TRASH_DIR, name)
+            try:
+                sz = os.path.getsize(fp) if os.path.isfile(fp) else 0
+            except OSError:
+                sz = 0
+            total += sz
+            items.append({"name": name, "size": sz})
+    return {"ok": True, "items": items, "total": total}
+
+
+def trash_clear():
+    """清空降级回收站目录。返回 {ok, removed}。
+
+    ⚠️ 逐条 try/except Exception（不只是 OSError）：单条失败（被占用、权限、
+    外部安全策略拦截）不应让整个请求 500，能删多少删多少。
+    """
+    removed = 0
+    if os.path.isdir(TRASH_DIR):
+        for name in os.listdir(TRASH_DIR):
+            fp = os.path.join(TRASH_DIR, name)
+            try:
+                if os.path.isfile(fp) or os.path.islink(fp):
+                    os.unlink(fp)
+                    removed += 1
+                elif os.path.isdir(fp):
+                    shutil.rmtree(fp, ignore_errors=True)
+                    removed += 1
+            except Exception:
+                pass
+    return {"ok": True, "removed": removed}
 
 
 def model_delete(path):

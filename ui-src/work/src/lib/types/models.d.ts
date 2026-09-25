@@ -14,6 +14,8 @@ export interface ModelOption {
 	id: string;
 	name: string;
 	model: string;
+	/** 模型文件的绝对路径（后端 /models 提供时有值；缺失时可用 manager /api/models 兜底匹配） */
+	path?: string;
 	description?: string;
 	capabilities: string[];
 	modalities?: ModelModalities;

@@ -439,6 +439,23 @@ export interface ModelDeleteResult {
 	error: string | null;
 }
 
+/** 降级回收站（models/.trash）内容条目 */
+export interface ManagerTrashItem {
+	name: string;
+	size: number;
+}
+
+export interface ManagerTrashInfo {
+	ok: boolean;
+	items: ManagerTrashItem[];
+	total: number;
+}
+
+export interface ManagerTrashCleared {
+	ok: boolean;
+	removed: number;
+}
+
 export interface HfJob {
 	id: string;
 	repo: string;
@@ -560,6 +577,20 @@ export class ManagerService {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ path }),
+		});
+	}
+
+	/** ③：列出降级回收站（models/.trash）内容。GET 列出、POST 清空。 */
+	static modelTrashList(): Promise<ManagerTrashInfo> {
+		return managerFetch<ManagerTrashInfo>('/api/model-trash');
+	}
+
+	/** ③：清空降级回收站（models/.trash）。 */
+	static modelTrashClear(): Promise<ManagerTrashCleared> {
+		return managerFetch<ManagerTrashCleared>('/api/model-trash', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ clear: true }),
 		});
 	}
 

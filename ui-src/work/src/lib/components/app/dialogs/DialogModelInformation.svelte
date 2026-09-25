@@ -6,7 +6,7 @@
 	import type { ApiLlamaCppServerProps } from '$lib/types';
 	import { formatFileSize, formatNumber, formatParameters } from '$lib/utils';
 	import { ManagerService } from '$lib/services';
-	import type { ManagerModelMeta, ModelDeleteCheck } from '$lib/services';
+	import type { ManagerModelMeta, ManagerModel, ManagerTrashInfo, ModelDeleteCheck } from '$lib/services';
 	import { launchPresetsStore, normalizeModelKey } from '$lib/stores';
 
 	interface Props {
@@ -88,6 +88,39 @@
 	let deleteCheck = $state<ModelDeleteCheck | null>(null);
 	let deleting = $state(false);
 	let deleteError = $state('');
+	// manager /api/models 兜底：ModelOption.path 缺失时按文件名对账出绝对路径
+	let managerModels = $state<ManagerModel[]>([]);
+	let trashInfo = $state<ManagerTrashInfo | null>(null);
+
+	// manager 的 /api/models 列表（带绝对 path），用于把列表项解析成文件路径
+	function basename(p: string): string {
+		const segs = (p ?? '').replace(/\\/g, '/').split('/');
+		return segs[segs.length - 1] ?? '';
+	}
+
+	/**
+	 * 当前模型的 GGUF 绝对路径。
+	 *
+	 * ⚠️ 不能直接用 firstModel.path：ModelOption.path 只有在后端 /models 返回该
+	 * 字段时才有值（旧响应里是 undefined）。所以先试直取，取不到就用 manager
+	 * 的 /api/models 按「文件名 / 全路径」兜底匹配 —— meta 写入与删除守卫
+	 * 都必须拿真实路径，否则会静默失效。
+	 */
+	let resolvedPath = $derived.by(() => {
+		const direct = firstModel?.path;
+		if (direct) return direct;
+		if (!firstModel || managerModels.length === 0) return '';
+		const candidates = new Set(
+			[firstModel.model, firstModel.name, firstModel.id]
+				.filter((x): x is string => !!x)
+				.map((x) => x.toLowerCase())
+		);
+		const hit = managerModels.find((m) => {
+			const lower = m.path.toLowerCase();
+			return candidates.has(lower) || candidates.has(basename(lower));
+		});
+		return hit?.path ?? '';
+	});
 
 	// 后端 key 是 os.path.normcase(abspath)（Windows 下小写）；前端按小写做大小写不敏感匹配。
 	function metaForPath(path?: string): ManagerModelMeta {
@@ -98,22 +131,42 @@
 		}
 		return userMetaMap[k] ?? {};
 	}
-	let currentMeta = $derived(metaForPath(firstModel?.path));
+	let currentMeta = $derived(metaForPath(resolvedPath));
 
-	// 该模型被几个启动方案引用（localStorage，manager 看不见 —— 只做软警告，不阻断删除）。
-	let presetRefs = $derived.by(() => {
-		const k = normalizeModelKey(firstModel?.path);
-		const presets = (launchPresetsStore.modelPresets?.[k]?.length ?? 0);
-		const override = launchPresetsStore.modelOverrides?.[k] ? 1 : 0;
-		return presets + override;
+	// 该模型被哪些启动方案引用（localStorage，manager 看不见 —— 只做软警告，不阻断删除）。
+	// 引用 = 它自己保存的方案 + 选中了某份全局方案 + 有参数覆盖（覆盖跟随生效方案）。
+	let presetNames = $derived.by(() => {
+		if (!resolvedPath) return [] as string[];
+		const k = normalizeModelKey(resolvedPath);
+		const names: string[] = [];
+		for (const p of launchPresetsStore.modelPresets[k] ?? []) names.push(p.name);
+		const activeId = launchPresetsStore.modelActive[k];
+		if (activeId) {
+			const glob = launchPresetsStore.presets.find((p) => p.id === activeId);
+			if (glob && !names.includes(glob.name)) names.push(glob.name);
+		}
+		const override = launchPresetsStore.modelOverrides[k];
+		if (override && Object.keys(override).length > 0) {
+			const ap = launchPresetsStore.activePresetFor({ path: resolvedPath });
+			if (ap && !names.includes(ap.name)) names.push(ap.name);
+		}
+		return names;
 	});
 
-	// 打开时拉取整份元数据，合并进模型列表
+	// 打开时拉取整份元数据 + manager 模型表（路径兜底用）+ 降级回收站内容
 	$effect(() => {
 		if (open) {
 			ManagerService.modelMetaGet()
 				.then((r) => { if (r?.ok) userMetaMap = r.meta; })
 				.catch(() => {});
+			ManagerService.listModels()
+				.then((list) => { managerModels = list; })
+				.catch(() => {});
+			ManagerService.modelTrashList()
+				.then((r) => { if (r?.ok) trashInfo = r; })
+				.catch(() => { trashInfo = null; });
+		} else {
+			trashInfo = null;
 		}
 	});
 
@@ -123,7 +176,7 @@
 	});
 
 	async function persist(patch: Partial<ManagerModelMeta>) {
-		const path = firstModel?.path;
+		const path = resolvedPath;
 		if (!path) return;
 		try {
 			await ManagerService.modelMetaSet(path, patch);
@@ -158,7 +211,7 @@
 		}
 	}
 	async function openDeleteCheck() {
-		const path = firstModel?.path;
+		const path = resolvedPath;
 		if (!path) return;
 		deleteError = '';
 		try {
@@ -168,7 +221,7 @@
 		}
 	}
 	async function confirmDelete() {
-		const path = firstModel?.path;
+		const path = resolvedPath;
 		if (!path || !deleteCheck?.deletable) return;
 		deleting = true;
 		deleteError = '';
@@ -186,6 +239,13 @@
 		} finally {
 			deleting = false;
 		}
+	}
+	async function clearTrash() {
+		try {
+			await ManagerService.modelTrashClear();
+			const r = await ManagerService.modelTrashList();
+			trashInfo = r?.ok ? r : { ok: true, items: [], total: 0 };
+		} catch { /* 清理失败不打断：下次打开会重新列出 */ }
 	}
 </script>
 
@@ -527,11 +587,12 @@
 						<div class="space-y-2 border-t border-border pt-3">
 							{#if deleteCheck && deleteCheck.deletable}
 								<div class="space-y-2">
-									{#if presetRefs > 0}
-										<div class="rounded-md bg-amber-500/15 px-2 py-1 text-xs text-amber-600">
-											Referenced by launch presets
-										</div>
-									{/if}
+								{#if presetNames.length > 0}
+									<div class="space-y-1 rounded-md bg-amber-500/15 px-2 py-1 text-xs text-amber-600">
+										<span>Referenced by launch presets</span>
+										<span class="block break-all font-medium">{presetNames.join(', ')}</span>
+									</div>
+								{/if}
 									<div class="text-xs text-muted-foreground">
 										This moves the file to the Recycle Bin. It can be restored from there.
 									</div>
@@ -563,6 +624,24 @@
 									onclick={openDeleteCheck}>Move to Recycle Bin</button>
 							{/if}
 						</div>
+
+						<!-- 降级回收站（models/.trash）：仅非 Windows 或回收站 API 失败时会有内容；
+						     Windows 正常走系统回收站，这里通常是隐藏的 -->
+						{#if trashInfo && trashInfo.items.length > 0}
+							<div class="space-y-2 border-t border-border pt-3">
+								<span class="text-sm text-muted-foreground">Trash folder</span>
+								<div class="text-xs text-muted-foreground">
+									{trashInfo.items.length}
+									<span>item(s)</span>
+									<span>·</span>
+									<span>{formatFileSize(trashInfo.total)}</span>
+								</div>
+								<button
+									type="button"
+									class="rounded-md border border-border px-3 py-1 text-sm hover:bg-muted"
+									onclick={clearTrash}>Empty trash folder</button>
+							</div>
+						{/if}
 					</div>
 
 			{:else if !isLoadingModels}

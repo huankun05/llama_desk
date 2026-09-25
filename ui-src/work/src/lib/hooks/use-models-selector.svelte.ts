@@ -1,5 +1,7 @@
-import { filterModelOptions, groupModelOptions } from '$lib/components/app/models/utils';
+import { filterModelOptions, groupModelOptions, modelFileKey } from '$lib/components/app/models/utils';
 import { CHAT_INPUT_FOCUS_SELECTOR } from '$lib/constants';
+import { ManagerService } from '$lib/services';
+import type { ManagerModelMeta } from '$lib/services';
 import { modelsStore, serverStore } from '$lib/stores';
 import type { ModelOption } from '$lib/types/models';
 import { onMount } from 'svelte';
@@ -28,8 +30,18 @@ export interface UseModelsSelectorReturn {
 	readonly searchTerm: string;
 	readonly showModelDialog: boolean;
 	readonly infoModelId: string | null;
+	/** ③ 标签/收藏筛选：当前是否只看收藏 */
+	readonly metaFavOnly: boolean;
+	/** ③ 标签/收藏筛选：当前选中的标签（null = 不过滤） */
+	readonly metaTag: string | null;
+	/** ③ 全部已用标签 */
+	readonly metaTags: string[];
+	/** ③ 存在任何收藏或标签时为 true（用于显示/隐藏筛选行） */
+	readonly hasMetaFilters: boolean;
 	setSearchTerm(value: string): void;
 	setShowModelDialog(value: boolean): void;
+	setMetaFavOnly(value: boolean): void;
+	setMetaTag(value: string | null): void;
 	handleInfoClick(modelName: string): void;
 	handleSelect(modelId: string): Promise<void>;
 	handleOpenChange(open: boolean): void;
@@ -77,7 +89,59 @@ export function useModelsSelector(opts: UseModelsSelectorOptions): UseModelsSele
 	let showModelDialog = $state(false);
 	let infoModelId = $state<string | null>(null);
 
-	const filteredOptions = $derived(filterModelOptions(options, searchTerm));
+	// ---------- ③ 标签/收藏筛选（meta 来自 manager，按文件名弱匹配） ----------
+	let metaMap = $state<Record<string, ManagerModelMeta>>({});
+	let metaFavOnly = $state(false);
+	let metaTag = $state<string | null>(null);
+
+	async function refreshMeta() {
+		try {
+			const r = await ManagerService.modelMetaGet();
+			if (r?.ok) metaMap = r.meta ?? {};
+		} catch {
+			/* manager 不在线时静默：筛选行也会因无 meta 而隐藏 */
+		}
+	}
+
+	/** 模型列表项对应的用户 meta（path 直配优先，退回「去扩展名文件名」弱匹配）。 */
+	function metaFor(option: ModelOption): ManagerModelMeta {
+		if (option.path) {
+			const direct = metaMap[option.path.toLowerCase()];
+			if (direct) return direct;
+		}
+		const key = modelFileKey(option.name || option.model || option.id);
+		if (key) {
+			for (const [k, v] of Object.entries(metaMap)) {
+				if (modelFileKey(k) === key) return v;
+			}
+		}
+		return {};
+	}
+
+	/** 全部已用标签（去重排序），供筛选行渲染。 */
+	const metaTags = $derived.by(() => {
+		const set = new Set<string>();
+		for (const v of Object.values(metaMap)) for (const t of v.tags ?? []) set.add(t);
+		return [...set].sort((a, b) => a.localeCompare(b));
+	});
+
+	/** 没有任何收藏/标签时隐藏筛选行，不给列表加无意义的噪音。 */
+	const hasMetaFilters = $derived.by(() => {
+		if (metaTags.length > 0) return true;
+		for (const v of Object.values(metaMap)) if (v.favorite) return true;
+		return false;
+	});
+
+	const filteredOptions = $derived.by(() => {
+		const list = filterModelOptions(options, searchTerm);
+		if (!metaFavOnly && !metaTag) return list;
+		return list.filter((option) => {
+			const m = metaFor(option);
+			if (metaFavOnly && !m.favorite) return false;
+			if (metaTag && !(m.tags ?? []).includes(metaTag)) return false;
+			return true;
+		});
+	});
 	const groupedFilteredOptions = $derived(
 		groupModelOptions(filteredOptions, modelsStore.favoriteModelIds, (m) =>
 			modelsStore.isModelLoaded(m)
@@ -93,6 +157,7 @@ export function useModelsSelector(opts: UseModelsSelectorOptions): UseModelsSele
 		modelsStore.fetch().catch((error) => {
 			console.error('Unable to load models:', error);
 		});
+		void refreshMeta();
 	});
 
 	function handleOpenChange(open: boolean) {
@@ -105,6 +170,12 @@ export function useModelsSelector(opts: UseModelsSelectorOptions): UseModelsSele
 				modelsStore.fetchRouterModels().then(() => {
 					modelsStore.props.fetchModalitiesForLoadedModels();
 				});
+				// 打开时重拉一次 meta：弹窗里刚加的标签/收藏能立刻出现在筛选行
+				void refreshMeta();
+			} else {
+				// 关闭时清掉筛选，避免下次打开「列表莫名变短」
+				metaFavOnly = false;
+				metaTag = null;
 			}
 
 			opts.onOpenChange?.(open);
@@ -255,12 +326,36 @@ export function useModelsSelector(opts: UseModelsSelectorOptions): UseModelsSele
 			showModelDialog = value;
 		},
 
-		get showModelDialog() {
-			return showModelDialog;
-		},
+	get showModelDialog() {
+		return showModelDialog;
+	},
 
-		get updating() {
-			return updating;
-		}
+	get metaFavOnly() {
+		return metaFavOnly;
+	},
+
+	get metaTag() {
+		return metaTag;
+	},
+
+	get metaTags() {
+		return metaTags;
+	},
+
+	get hasMetaFilters() {
+		return hasMetaFilters;
+	},
+
+	setMetaFavOnly(value: boolean) {
+		metaFavOnly = value;
+	},
+
+	setMetaTag(value: string | null) {
+		metaTag = value;
+	},
+
+	get updating() {
+		return updating;
+	}
 	};
 }

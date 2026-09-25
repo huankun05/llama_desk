@@ -14,7 +14,7 @@ from .gguf import (parse_gguf, parse_gguf_cached, prune_gguf_cache, guess_quant,
                    kv_shape, sweep_parked_aliases, find_mmproj, GGUF_VAL_TYPES)
 from .scan import _do_scan, get_models, _refresher
 from .meta import (get_model_meta, set_model_meta, model_delete_check,
-                   model_delete, _load_meta)
+                   model_delete, _load_meta, trash_list, trash_clear)
 from .fit import (LLAMA_FIT, FIT_TARGET_MIB, FIT_MIN_LAYERS, FIT_TIMEOUT,
                   AUTO_KV_LADDER, AUTO_CTX_FLOOR, AUTO_OFFLOAD_ADAPT, FIT_PLAN_TTL,
                   FIT_MEM_REF_CTX, FIT_CACHE_FILE, FIT_CACHE_TTL, FIT_CACHE_MAX,
@@ -476,6 +476,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.json(400, {"ok": False, "error": "path required"})
                 else:
                     self.json(200, model_delete(path))
+            elif p == "/api/model-trash":
+                if data is None:
+                    # GET：列出降级回收站（models/.trash）的内容
+                    self.json(200, trash_list())
+                else:
+                    # POST：清空
+                    self.json(200, trash_clear())
             # ---------- 第 2 批 A：HuggingFace 下载器 ----------
             elif p == "/api/hf-search":
                 qs = parse_qs(u.query)
