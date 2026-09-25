@@ -3,6 +3,12 @@
   "identifier": "default",
   "description": "llama-desk 默认能力集（界面由 llama-server 提供；本地备份由 WebUI 通过浏览器 File System Access API 直接落盘，不经过 IPC）",
   "windows": ["main"],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:8080",
+      "http://localhost:8080"
+    ]
+  },
   "permissions": [
     "core:default",
     "notification:default"
