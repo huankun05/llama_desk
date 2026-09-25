@@ -240,11 +240,17 @@
 		if (results.length > 0 || query.trim()) void doSearch();
 	}
 
-	/** 把当前搜索状态（关键词/排序/筛选/结果）存进 sessionStorage，刷新或离开返回后免重查。 */
+	/**
+	 * 把当前搜索状态（关键词/排序/筛选/结果）存进 **sessionStorage**：
+	 * 会话内切页面 / 刷新后免重查，但**关掉应用再开就是全新的**（用户明确要求：
+	 * 不能像 localStorage 那样把上次的搜索词带到下一次启动 —— 那曾是真 bug）。
+	 */
+	const SEARCH_STATE_KEY = 'llama_desk.hf_download_state';
+
 	function saveSearchState(): void {
 		try {
-			localStorage.setItem(
-				'llama_desk.hf_download_state',
+			sessionStorage.setItem(
+				SEARCH_STATE_KEY,
 				JSON.stringify({
 					query, sortBy, sizeFilter, quantFilter,
 					hasMore: moreAvailable, results, filesByRepo
@@ -255,10 +261,16 @@
 		}
 	}
 
-	/** 恢复上次离开时的搜索状态（只恢复展示，不自动发请求）。 */
+	/** 恢复本次会话早先的搜索状态（只恢复展示，不自动发请求）。 */
 	function restoreSearchState(): void {
+		// 一次性迁移：把修复前误写进 localStorage 的旧状态清掉（重启后"复活"的元凶）
 		try {
-			const raw = localStorage.getItem('llama_desk.hf_download_state');
+			localStorage.removeItem(SEARCH_STATE_KEY);
+		} catch {
+			// ignore
+		}
+		try {
+			const raw = sessionStorage.getItem(SEARCH_STATE_KEY);
 			if (!raw) return;
 			const s = JSON.parse(raw) as {
 				query?: string; sortBy?: string; sizeFilter?: string; quantFilter?: string;
@@ -275,6 +287,23 @@
 			if (s.filesByRepo) filesByRepo = s.filesByRepo;
 		} catch {
 			// 解析失败 → 忽略，下次照常重查
+		}
+	}
+
+	/**
+	 * 真正的「擦掉」：输入框的 × / 清空不只清 query 变量 —— 结果列表、展开态和
+	 * 暂存的状态一并清掉（筛选选择保留，作用于下一次搜索）。
+	 * 不修这个的话，旧状态还躺在 storage 里，切页回来又会「复活」。
+	 */
+	function clearSearch(): void {
+		results = [];
+		moreAvailable = false;
+		filesByRepo = {};
+		expanded = null;
+		try {
+			sessionStorage.removeItem(SEARCH_STATE_KEY);
+		} catch {
+			// ignore
 		}
 	}
 
@@ -488,6 +517,10 @@
 				class="w-full rounded-md border border-input bg-background py-2 pr-3 pl-9 text-sm"
 				placeholder="Search HuggingFace GGUF models…"
 				bind:value={query}
+				oninput={(e) => {
+					// Chromium 里点 × 清空 = input 事件 + 空值 → 连结果带暂存一起真正擦掉
+					if (!e.currentTarget.value) clearSearch();
+				}}
 				onkeydown={(e: KeyboardEvent) => {
 					if (e.key === 'Enter') void doSearch();
 				}}

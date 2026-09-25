@@ -1095,3 +1095,21 @@ webui/manager_pkg/
   needs-grant 提示 / 补授权 toast）。
 
 **第 2 级 ✅ 已完成（9-25，见上方收尾记录）**：跨平台进程管理（`procinfo.py`）+ 无 NVIDIA 降级盘点（unknown verdict、既有空值兜底确认）。AMD/Intel 完整支持与 macOS/Linux 移植成本高，仍不建议。
+
+**下载页搜索状态「重启复活」修复 ✅（9-25 下午，用户截图反馈）**：
+- **现象**：重启应用后下载页还留着上次的搜索词/筛选/结果；点输入框 × 也擦不干净。
+- **根因**：`saveSearchState` 注释写 sessionStorage、**代码用的是 localStorage**
+  （跨重启存活）；× 清空只清 `query` 变量，不触发重存也不清结果 → 旧状态原样躺在
+  storage 里，切页回来「复活」。
+- **修复**（`download/+page.svelte`）：① localStorage → **sessionStorage**
+  （会话内切页/刷新免重查 ✓，关应用即清 ✓ —— 与用户期望逐字对齐）；② 新增
+  `clearSearch()`：× / 清空（input 空值）时连结果、展开态、暂存一起擦掉，
+  筛选选择保留；③ 一次性迁移：恢复前 `localStorage.removeItem` 清掉旧病残留。
+- **顺带**：补上轮遗留的 DICT 缺词条 `toggle size sort`（aria-label 也会被 overlay
+  翻译 → probe 选择器改中英双语）；README 补「模型下载的网络源」小节
+  （`HF_API_BASE=https://hf-mirror.com` 镜像切换，分发可用性）。
+- **验收**：probe_download_page 扩到 **34 断言 / 34 PASS**（新场景 10 固化持久化
+  契约：会话内刷新恢复 ✓ / 清空真擦（query 空 + sessionStorage 删 + 结果回空态）✓ /
+  新会话全新 ✓）；部署 `overlay.js?v=109`。
+- **遗留**：探针场景 9 在 `models/from-hf/Qwen_Qwen2.5-0.5B-Instruct-GGUF` 积了
+  1.6GB 真实模型残留（多轮探针累积）——留给用户在 Manage 弹窗里删，顺便验证回收站删除。

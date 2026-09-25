@@ -185,7 +185,11 @@ const gbSeq = () =>
 	);
 const seq0 = await gbSeq();
 check('默认排序为大到小', seq0.length >= 2 && seq0[0] >= seq0[seq0.length - 1], JSON.stringify(seq0));
-await page.locator('button[aria-label="toggle size sort"]').first().click();
+// ⚠️ overlay 连 aria-label 都翻译（'toggle size sort' → '切换大小排序'）→ 选择器必须中英双语
+await page
+	.locator('button[aria-label="toggle size sort"], button[aria-label="切换大小排序"]')
+	.first()
+	.click();
 await page.waitForTimeout(300);
 const seq1 = await gbSeq();
 check('点击后反转为小到大', seq1.length >= 2 && seq1[0] <= seq1[seq1.length - 1], JSON.stringify(seq1));
@@ -335,6 +339,53 @@ if ((await loadBtn.count()) > 0) {
 }
 
 check('无页面 JS 错误', pageErrors.length === 0, pageErrors.slice(0, 2).join(' | '));
+
+// ===== 场景 10：搜索状态持久化（2026-09-25 修复的回归防护）=====
+// 契约：① 会话内（同页签）切页/刷新 → 状态恢复；② 点输入框 × → 连结果带暂存真正擦掉；
+// ③ 新会话（≈应用重启）→ 全新页面，绝不能把上次搜索词带回来（localStorage 旧病）。
+say('场景 10：搜索状态持久化（sessionStorage 契约）');
+{
+	const page2 = await browser.newPage();
+	page2.on('pageerror', (e) => pageErrors.push(String(e)));
+	await page2.goto(`${BASE}/#/download`, { waitUntil: 'domcontentloaded' });
+	await page2.waitForTimeout(1200);
+
+	// ① 搜一次 → 刷新 → 状态应恢复
+	await page2.fill('input[type="search"]', 'qwen2.5 0.5b gguf');
+	await page2.keyboard.press('Enter');
+	await page2.waitForTimeout(4000);
+	const q0 = await page2.inputValue('input[type="search"]');
+	check('搜索后 query 在框里', q0.includes('qwen2.5'), q0);
+	await page2.reload({ waitUntil: 'domcontentloaded' });
+	await page2.waitForTimeout(1500);
+	const q1 = await page2.inputValue('input[type="search"]');
+	check('刷新后搜索状态恢复（会话内）', q1.includes('qwen2.5'), q1);
+
+	// ② 点 ×（Chromium 对 type=search 的清空 = input 事件 + 空值）→ 真正擦掉
+	await page2.click('input[type="search"]');
+	await page2.fill('input[type="search"]', '');
+	await page2.waitForTimeout(400);
+	const q2 = await page2.inputValue('input[type="search"]');
+	const stored = await page2.evaluate(() => sessionStorage.getItem('llama_desk.hf_download_state'));
+	check('清空后 query 为空', q2 === '', q2);
+	check('清空后暂存状态已删', stored === null, String(stored));
+	const bodyText2 = (await page2.locator('body').innerText()) || '';
+	check(
+		'清空后结果列表回到初始空态',
+		/Search above to find GGUF models|先在上方搜索/.test(bodyText2),
+		''
+	);
+
+	// ③ 新会话（模拟应用重启）→ 全新页面
+	const ctx3 = await browser.newContext();
+	const page3 = await ctx3.newPage();
+	await page3.goto(`${BASE}/#/download`, { waitUntil: 'domcontentloaded' });
+	await page3.waitForTimeout(1200);
+	const q3 = await page3.inputValue('input[type="search"]');
+	check('新会话（重启）不带出旧搜索词', q3 === '', q3);
+	await ctx3.close();
+	await page2.close();
+}
 
 await browser.close();
 say(`\n结果：${ok.length} PASS / ${bad.length} FAIL`);

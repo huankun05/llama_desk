@@ -1107,6 +1107,7 @@
     '3-6 GB': '3-6 GB',
     '> 6 GB': '> 6 GB',
     'Open folder': '打开文件夹',
+    'toggle size sort': '切换大小排序',
     'Delete record': '删除记录',
     'No files match this size filter.': '没有符合该大小筛选的文件。',
     'Load more': '加载更多',
