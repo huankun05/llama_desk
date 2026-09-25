@@ -34,6 +34,8 @@
 	import { initStores } from '$lib/stores/init';
 	import { maybeAutoBackup } from '$lib/services/autoBackupService';
 	import { getBackupDirStatus, requestBackupDirRegrant } from '$lib/services/backupService';
+	import { getAppInfo, onUpdateAvailableEvent, shellAvailable } from '$lib/services/shell.service';
+	import type { StartupUpdateNotice } from '$lib/types';
 	import { ModeWatcher } from 'mode-watcher';
 	import { untrack } from 'svelte';
 	import { onMount } from 'svelte';
@@ -183,6 +185,48 @@
 		});
 	}
 
+	/**
+	 * 跳到「设置 → 关于应用」（启动期更新提示弹窗的「View update」按钮）。
+	 * 与外壳 eval 版同款逻辑：先确保 about 分区展开（localStorage 折叠记忆）、
+	 * 落 sessionStorage 标记兜底「设置页还没挂载」，再点真实的侧栏链接导航
+	 * （location.hash 会绕过链接拦截、重置侧栏折叠）；已在设置页则直接广播事件。
+	 */
+	function gotoAboutFromNotice() {
+		try {
+			const raw = localStorage.getItem('webui.settings.sections');
+			const parsed = raw ? JSON.parse(raw) : {};
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				parsed.about = false;
+				localStorage.setItem('webui.settings.sections', JSON.stringify(parsed));
+			}
+			sessionStorage.setItem('llama_desk.goto_about', '1');
+			if (page.url.hash.includes('/settings')) {
+				window.dispatchEvent(new CustomEvent('llama-desk:goto-about'));
+			} else {
+				const link = document.querySelector<HTMLAnchorElement>('a[href="#/settings"]');
+				if (link) link.click();
+				else window.dispatchEvent(new CustomEvent('llama-desk:goto-about'));
+			}
+		} catch {
+			/* 存储坏了就只尽力导航 */
+		}
+	}
+
+	/**
+	 * 启动期自动检查发现新版本：应用内 toast（含后端拼好的版本对比），
+	 * 点击「View update」跳到关于应用下载安装。一个应用会话只弹一次
+	 * （sessionStorage 标记 —— STARTUP_NOTICE 在外壳侧整个会话都在，刷新页面会重复读到）。
+	 */
+	function showUpdateNoticeToast(n: StartupUpdateNotice) {
+		if (sessionStorage.getItem('llama_desk.update_notice_shown') === '1') return;
+		sessionStorage.setItem('llama_desk.update_notice_shown', '1');
+		toast.message('llama.cpp update available:', {
+			description: n.message,
+			action: { label: 'View update', onClick: () => gotoAboutFromNotice() },
+			duration: 15000
+		});
+	}
+
 	onMount(() => {
 		updateFavicon();
 		// snapshot of every backend running stream on first load, populates the sidebar spinners
@@ -216,10 +260,28 @@
 		window.addEventListener('pointerdown', regrantKick, true);
 		window.addEventListener('keydown', regrantKick, true);
 
+		// 桌面外壳的启动期更新提示：挂载时读 app_info.startup_update（事件比挂载早的情形），
+		// 再订阅 app-update-available（挂载后才发现的情形）。只有桌面外壳有 IPC。
+		let noticeDisposed = false;
+		let unlistenNotice: (() => void) | null = null;
+		if (shellAvailable()) {
+			void getAppInfo()
+				.then((v) => {
+					if (v?.startup_update) showUpdateNoticeToast(v.startup_update);
+				})
+				.catch(() => {});
+			void onUpdateAvailableEvent((n) => showUpdateNoticeToast(n)).then((u) => {
+				if (noticeDisposed) u();
+				else unlistenNotice = u;
+			});
+		}
+
 		const watchManagerEventsCleanup = watchManagerEvents();
 
 		return () => {
 			watchManagerEventsCleanup?.();
+			noticeDisposed = true;
+			unlistenNotice?.();
 			window.clearInterval(autoBackupTimer);
 			window.clearTimeout(autoBackupKick);
 			window.removeEventListener('pointerdown', regrantKick, true);

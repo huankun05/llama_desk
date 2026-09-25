@@ -555,22 +555,31 @@ pub fn install_latest(cfg: &AppConfig) -> Result<String, String> {
     }
 }
 
-/// 启动期自动更新：仅在配置开启时调用，且必须在拉起服务之前执行。
-/// 有更新则静默下载替换；拿不到本地版本号时保守跳过（不替换）。
-pub fn auto_update(cfg: &AppConfig) -> Result<String, String> {
-    let cur = current_build(cfg);
-    let latest = fetch_latest()?;
-    match cur {
-        Some(c) if c >= latest.build => Ok(format!("已是最新（本地 build {c}，最新 {}）", latest.tag)),
-        Some(c) => {
-            let msg = install_latest(cfg)?;
-            Ok(format!("（本地 {c} → 最新 {}）{msg}", latest.tag))
-        }
-        None => Err(format!(
-            "无法读取本地 llama.cpp 版本号，为安全起见跳过自动更新（最新为 {}）",
-            latest.tag
-        )),
-    }
+/// 启动期「检查并提示」的结果：GitHub 上有比本地更高的构建号。
+#[derive(Clone, Debug)]
+pub struct UpdateNotice {
+    /// 最新 tag（如 "b11177"）
+    pub tag: String,
+    pub build: u32,
+    /// 发布日期（yyyy-MM-dd）
+    pub date: Option<String>,
+    /// 本地构建号（读不到本地版本时为 None，此时不提示、不比较）
+    pub local_build: Option<u32>,
+}
+
+/// 启动期「只检查不安装」：本地版本已知且 GitHub 有更高构建号时返回 Some。
+/// 任何一步失败都返回 None（静默跳过，绝不打扰启动流程）。
+/// 注意：与旧版「自动更新」语义不同 —— 本函数**永不下载**，安装一律由用户在
+/// 设置 → 关于应用 里手动确认（2026-09-25 按需求改定）。
+pub fn check_for_notice(cfg: &AppConfig) -> Option<UpdateNotice> {
+    let cur = current_build(cfg)?;
+    let latest = fetch_latest().ok()?;
+    (latest.build > cur).then(|| UpdateNotice {
+        tag: latest.tag,
+        build: latest.build,
+        date: latest.date,
+        local_build: Some(cur),
+    })
 }
 
 /// 设置页「检查更新」：只报告，不下载。返回结构化结果（前端按 message 展示）。

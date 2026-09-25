@@ -9,7 +9,7 @@
  * （{ stage: 'running' | 'done' | 'error', message }），onUpdateEvent 订阅它。
  */
 
-import type { AppInfo, ShellUpdateEvent, UpdateCheckResult } from '$lib/types/shell';
+import type { AppInfo, ShellUpdateEvent, StartupUpdateNotice, UpdateCheckResult } from '$lib/types/shell';
 
 type TauriCore = typeof import('@tauri-apps/api/core');
 type TauriEvent = typeof import('@tauri-apps/api/event');
@@ -78,6 +78,16 @@ export async function restartLlama(): Promise<void> {
 	await core.invoke('app_restart_llama');
 }
 
+/**
+ * 重启整个应用（llama.cpp 更新装完后「是否重启更新」的确认按钮调用）。
+ * 外壳会先发系统通知「应用正在更新」，再退出并重新拉起新实例。
+ */
+export async function restartApp(): Promise<void> {
+	const core = await tauriCore();
+	if (!core) return;
+	await core.invoke('app_restart_app');
+}
+
 /** 订阅 llama.cpp 更新进度事件。返回取消订阅函数。 */
 export async function onUpdateEvent(
 	handler: (e: ShellUpdateEvent) => void
@@ -85,5 +95,21 @@ export async function onUpdateEvent(
 	const ev = await tauriEvent();
 	if (!ev) return () => {};
 	const unlisten = await ev.listen<ShellUpdateEvent>('app-update', (e) => handler(e.payload));
+	return unlisten;
+}
+
+/**
+ * 订阅「启动期自动检查发现新版本」事件（app-update-available）。
+ * 用户正好停在关于应用页时，横幅据此立即出现；返回取消订阅函数。
+ */
+export async function onUpdateAvailableEvent(
+	handler: (n: StartupUpdateNotice) => void
+): Promise<() => void> {
+	const ev = await tauriEvent();
+	if (!ev) return () => {};
+	const unlisten = await ev.listen<StartupUpdateNotice>(
+		'app-update-available',
+		(e) => handler(e.payload)
+	);
 	return unlisten;
 }

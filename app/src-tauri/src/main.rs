@@ -9,6 +9,9 @@ mod supervisor;
 mod updater;
 
 use std::path::Path;
+use std::process::Command;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -19,7 +22,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewUrl, WebviewWindowBuil
 use tauri_plugin_notification::NotificationExt;
 
 use config::AppConfig;
-use supervisor::Supervisor;
+use supervisor::{CREATE_NO_WINDOW, Supervisor};
 
 const WIN: &str = "main";
 
@@ -31,6 +34,12 @@ static WINDOW_READY: AtomicBool = AtomicBool::new(false);
 static UI_READY: AtomicBool = AtomicBool::new(false);
 /// 编排只允许启动一次（窗口线程与看门狗谁先到谁负责）。
 static BOOT_STARTED: AtomicBool = AtomicBool::new(false);
+/// 启动期自动检查发现的「有新版本」提示（check_for_notice 的结果）。
+/// 检查跑在后台线程，结果暂存这里；app_info 读给前端应用内弹窗/横幅。
+/// 2026-09-25 按需求改定：提示是**应用内** toast（不再发系统通知）——
+/// 前端 layout 挂载时读这里，发现新版本就弹「查看更新」跳设置 → 关于应用。
+static STARTUP_NOTICE: std::sync::Mutex<Option<updater::UpdateNotice>> =
+    std::sync::Mutex::new(None);
 
 /// 前端启动页加载完成时调用，证明 WebView2 真的能渲染。
 #[tauri::command]
@@ -75,6 +84,32 @@ fn emit_update(app: &AppHandle, stage: &str, message: &str) {
     );
 }
 
+/// 启动期自动检查发现的「有新版本」转成 app_info 里的 JSON（无则 null）。
+/// message 由后端拼好中文（含版本对比），前端 toast 直接显示 —— 动态插值字符串
+/// 没法走 overlay 词典（整文本节点精确匹配），后端拼好是既有的通行做法。
+fn startup_notice_json() -> serde_json::Value {
+    let g = STARTUP_NOTICE.lock().unwrap();
+    match g.as_ref() {
+        Some(n) => {
+            let date = n.date.clone().unwrap_or_default();
+            let message = match n.local_build {
+                Some(b) if date.is_empty() => format!("当前 build {b}，最新 {}", n.tag),
+                Some(b) => format!("当前 build {b}，最新 {}（{date}）", n.tag),
+                None if date.is_empty() => format!("最新 {}", n.tag),
+                None => format!("最新 {}（{date}）", n.tag),
+            };
+            serde_json::json!({
+                "tag": n.tag,
+                "build": n.build,
+                "date": n.date,
+                "local_build": n.local_build,
+                "message": message,
+            })
+        }
+        None => serde_json::Value::Null,
+    }
+}
+
 #[tauri::command]
 async fn app_info(app: AppHandle) -> Result<serde_json::Value, String> {
     let cfg = app.state::<AppConfig>().inner().clone();
@@ -105,6 +140,8 @@ async fn app_info(app: AppHandle) -> Result<serde_json::Value, String> {
                 .join("llama-desk-update")
                 .to_string_lossy(),
             "log_dir": cfg.log_dir,
+            // 启动期自动检查（仅提示不安装）发现的新版本；无则 null
+            "startup_update": startup_notice_json(),
         })
     })
     .await
@@ -162,6 +199,35 @@ async fn app_set_auto_update(app: AppHandle, enabled: bool) -> Result<bool, Stri
 fn app_open_logs(app: AppHandle) {
     let dir = app.state::<AppConfig>().inner().log_dir.clone();
     supervisor::open_dir(&dir);
+}
+
+/// 重启整个应用（llama.cpp 更新装完后由「关于应用」页的确认按钮调用）：
+/// ① 右下角系统通知「应用正在更新」；② 延迟拉起新实例；③ 本进程退出 ——
+/// RunEvent::Exit 里会收拾托管的 llama-server/manager，新实例起来后再重新编排拉起。
+/// 延迟拉起是为了错开 single-instance：本进程必须先真正退出，新实例才不会被
+/// 判成重复实例而只把旧窗口叫到前台。
+#[tauri::command]
+fn app_restart_app(app: AppHandle) {
+    let app2 = app.clone();
+    std::thread::spawn(move || {
+        let cfg = app2.state::<AppConfig>().inner().clone();
+        notify(
+            &app2,
+            "llama-desk",
+            "应用正在更新：重启以加载新版 llama.cpp…",
+        );
+        trace(&cfg.log_dir, "重启应用：用户已确认，退出并重新拉起");
+        let exe = std::env::current_exe().unwrap_or_default();
+        let script = format!(
+            "Start-Sleep -Milliseconds 1200; Start-Process -FilePath '{}'",
+            exe.to_string_lossy().replace('\'', "''")
+        );
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+        app2.exit(0);
+    });
 }
 
 /// 重启本地服务（原托盘「重启本地服务」搬到这里）：只动自己拉起的 llama-server，
@@ -250,6 +316,39 @@ fn selftest(cfg: AppConfig) {
     println!("[selftest] 完成，退出码 0");
 }
 
+/// 「启动时检查 llama.cpp 更新」（auto_update_llama_cpp 开关）：
+/// 后台线程跑，只检查并提示，**永不下载** —— 安装一律由用户在
+/// 「设置 → 关于应用」手动确认（2026-09-25 按需求改定的语义）。
+/// 两路回报：`app-update-available` 事件（用户停在任意页面，应用内 toast 立即弹）
+/// / app_info.startup_update（挂载更早时兜底，layout 挂载时读它）。
+/// 网络失败静默跳过（trace 留痕），绝不打扰启动。
+fn start_update_check(handle: AppHandle) {
+    let cfg = handle.state::<AppConfig>().inner().clone();
+    if !cfg.auto_update_llama_cpp {
+        return;
+    }
+    std::thread::spawn(move || match updater::check_for_notice(&cfg) {
+        Some(n) => {
+            trace(
+                &cfg.log_dir,
+                &format!(
+                    "自动检查：发现新版本 {}（{}），已提示用户",
+                    n.tag,
+                    n.date.as_deref().unwrap_or("日期未知")
+                ),
+            );
+            *STARTUP_NOTICE.lock().unwrap() = Some(n.clone());
+            // 事件给「前端已挂载」的场景：应用内 toast 立即出现；
+            // 时机太早（前端未挂载）也无妨，layout 挂载时读 app_info.startup_update
+            let _ = handle.emit(
+                "app-update-available",
+                serde_json::json!({ "tag": n.tag, "date": n.date, "build": n.build }),
+            );
+        }
+        None => trace(&cfg.log_dir, "自动检查：无新版本（或本地版本未知/网络失败）"),
+    });
+}
+
 fn main() {
     let cfg = AppConfig::load();
     let _ = std::fs::create_dir_all(&cfg.log_dir);
@@ -267,15 +366,9 @@ fn main() {
         return;
     }
 
-    // 自动更新 llama.cpp：必须在拉起服务之前完成，避免替换正在运行的二进制。
-    // 默认关闭（config.json 的 auto_update_llama_cpp），失败时静默跳过。
-    if cfg.auto_update_llama_cpp {
-        trace(&cfg.log_dir, "自动更新：开始检查 llama.cpp 新版本");
-        match updater::auto_update(&cfg) {
-            Ok(m) => trace(&cfg.log_dir, &format!("自动更新：{m}")),
-            Err(e) => trace(&cfg.log_dir, &format!("自动更新：跳过（{e}）")),
-        }
-    }
+    // 「启动时检查 llama.cpp 更新」移到 setup 之后的后台线程（见 start_update_check）：
+    // 只检查并提示、不下载，也就不再有「必须在拉起服务前完成」的时序约束，
+    // 网络慢时也不会拖住启动编排（旧版在这里同步跑，最多能卡 30s）。
 
     let sup = Supervisor::new(cfg.clone());
     let cfg_setup = cfg.clone();
@@ -288,7 +381,8 @@ fn main() {
             app_update_now,
             app_set_auto_update,
             app_open_logs,
-            app_restart_llama
+            app_restart_llama,
+            app_restart_app
         ])
         .plugin(tauri_plugin_notification::init())
         // 第二实例只负责把已有窗口叫到前台
@@ -300,6 +394,9 @@ fn main() {
             app.manage(sup);
             app.manage(cfg_setup.clone());
             trace(&cfg_setup.log_dir, "setup: 进入");
+
+            // 启动期 llama.cpp 更新检查（开关开启时）：后台线程，只检查+提示
+            start_update_check(handle.clone());
 
             build_tray(app)?;
             trace(&cfg_setup.log_dir, "setup: 托盘就绪");

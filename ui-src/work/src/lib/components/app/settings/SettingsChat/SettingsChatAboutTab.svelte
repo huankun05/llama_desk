@@ -11,7 +11,7 @@
 	import { SettingsGroup } from '$lib/components/app';
 	import { Button } from '$lib/components/ui/button';
 	import { Switch } from '$lib/components/ui/switch';
-	import { shellAvailable, getAppInfo, checkAppUpdate, updateNow, setAutoUpdate, openLogs, restartLlama, onUpdateEvent } from '$lib/services/shell.service';
+	import { shellAvailable, getAppInfo, checkAppUpdate, updateNow, setAutoUpdate, openLogs, restartLlama, restartApp, onUpdateEvent, onUpdateAvailableEvent } from '$lib/services/shell.service';
 	import type { AppInfo } from '$lib/types';
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -44,6 +44,7 @@
 		// 更新在外壳的线程里跑（窗口最小化到托盘也继续），进度经事件+系统通知回报
 		let disposed = false;
 		let unlisten: (() => void) | null = null;
+		let unlistenAvail: (() => void) | null = null;
 		void onUpdateEvent((e) => {
 			if (e.stage === 'running') {
 				updating = true;
@@ -51,16 +52,38 @@
 			} else {
 				updating = false;
 				updateMessage = '';
-				if (e.stage === 'done') toast.success(e.message);
-				else toast.error(e.message);
+				if (e.stage === 'done') {
+					// 下载安装完成：按需求弹出「是否重启更新」——点「Restart now」重启应用，
+					// 外壳会先发「应用正在更新」系统通知再退出并拉起新实例
+					toast.success(e.message, {
+						action: { label: 'Restart now', onClick: () => void restartApp() },
+						duration: 15000
+					});
+				} else {
+					toast.error(e.message);
+				}
 			}
 		}).then((u) => {
 			if (disposed) u();
 			else unlisten = u;
 		});
+		// 启动期自动检查发现新版本：刷新 app_info 让横幅立即出现
+		//（若挂载前事件已发过，app_info.startup_update 里也存着同一份状态）
+		void onUpdateAvailableEvent(() => {
+			void getAppInfo()
+				.then((v) => {
+					info = v;
+					autoEnabled = v?.auto_update ?? false;
+				})
+				.catch(() => {});
+		}).then((u) => {
+			if (disposed) u();
+			else unlistenAvail = u;
+		});
 		return () => {
 			disposed = true;
 			unlisten?.();
+			unlistenAvail?.();
 		};
 	});
 
@@ -170,12 +193,43 @@
 
 		<SettingsGroup title="Updates">
 			<div class="space-y-4" data-probe="about-updates">
+				{#if info?.startup_update}
+					<!--
+						启动期自动检查发现的新版本：琥珀横幅 + 版本对比 + 快捷安装按钮。
+						两个来源：挂载时 app_info.startup_update（通知点击跳转过来 / 早已发现）、
+						停留本页时收到 app-update-available 事件（onMount 里刷新 info）。
+						用户流程：点「View update」从应用内弹窗跳到这里 → 确认下载 → 完成后
+						toast 询问是否重启（Restart now）→ 重启时外壳发「应用正在更新」系统通知。
+					-->
+					<div
+						class="flex flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300"
+						data-probe="about-startup-banner"
+					>
+						<TriangleAlert class="h-4 w-4 shrink-0" />
+						<span>llama.cpp update available:</span>
+						<span class="font-mono" data-probe="about-startup-banner-compare">
+							{#if info.startup_update.local_build != null}
+								build {info.startup_update.local_build} → {/if}{info.startup_update.tag}
+						</span>
+						{#if info.startup_update.date}
+							<span class="text-xs">({info.startup_update.date})</span>
+						{/if}
+						<Button
+							variant="outline"
+							size="sm"
+							onclick={onUpdateNow}
+							disabled={checking || updating || shellStale}
+						>
+							Download &amp; install update
+						</Button>
+					</div>
+				{/if}
 				<div class="flex flex-wrap items-center justify-between gap-2">
 					<div>
 						<div class="text-sm font-medium">Check for llama.cpp updates on startup</div>
 						<p class="text-xs text-muted-foreground">
-							When enabled, the app checks GitHub at startup and silently installs a new build
-							before launching the service.
+							When enabled, the app checks GitHub at startup and notifies you when a new build is
+							available. Downloading and installing always requires your confirmation.
 						</p>
 					</div>
 					<Switch

@@ -18,6 +18,7 @@
     "allow-app-update-now",
     "allow-app-set-auto-update",
     "allow-app-open-logs",
-    "allow-app-restart-llama"
+    "allow-app-restart-llama",
+    "allow-app-restart-app"
   ]
 }

@@ -16,6 +16,7 @@ fn main() {
             "app_set_auto_update",
             "app_open_logs",
             "app_restart_llama",
+            "app_restart_app",
         ])),
     )
     .expect("failed to run tauri-build");

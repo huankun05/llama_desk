@@ -27,6 +27,7 @@
 	import { setMode } from 'mode-watcher';
 	import { fade } from 'svelte/transition';
 	import { toast } from 'svelte-sonner';
+	import { onMount } from 'svelte';
 
 	// 设置现在是独立页面，不再有"关闭浮窗"这个动作。
 	// 原先保存成功是靠 onClose 关掉浮窗来当反馈的，页面化之后必须显式给一次提示，
@@ -49,6 +50,37 @@
 			activeSlug = found.slug;
 		}
 	}
+
+	/**
+	 * 跳到「关于应用」分区（桌面外壳的更新通知点击后经 eval 调到这里，见 main.rs 的
+	 * GOTO_ABOUT_JS）：先确保 about 分区是展开状态（CollapsibleSection 按 localStorage
+	 * 记忆折叠状态，{#key} 重建时读一次 —— 所以要先写存储再切 slug），再切过去。
+	 */
+	function gotoAbout() {
+		try {
+			const raw = localStorage.getItem(LS_SECTIONS);
+			const parsed = raw ? JSON.parse(raw) : null;
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				parsed.about = false;
+				localStorage.setItem(LS_SECTIONS, JSON.stringify(parsed));
+			}
+		} catch {
+			/* 存储坏了就只切分区，折叠状态维持原样 */
+		}
+		activeSlug = 'about';
+	}
+
+	onMount(() => {
+		// 双通道兜底：eval 里的 sessionStorage 标记覆盖「设置页还没挂载、事件丢失」，
+		// 自定义事件覆盖「用户已经在设置页」的实时跳转。
+		if (sessionStorage.getItem('llama_desk.goto_about') === '1') {
+			sessionStorage.removeItem('llama_desk.goto_about');
+			gotoAbout();
+		}
+		const handler = () => gotoAbout();
+		window.addEventListener('llama-desk:goto-about', handler);
+		return () => window.removeEventListener('llama-desk:goto-about', handler);
+	});
 
 	let currentSection = $derived(
 		SETTINGS_CHAT_SECTIONS.find((section) => section.slug === activeSlug) ||

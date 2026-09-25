@@ -3,6 +3,20 @@
  * 与 main.rs 的 app_info 命令、app_check_update 命令、app-update 事件载荷一一对应。
  */
 
+/** 启动期自动检查（仅提示不安装）发现的新版本信息。 */
+export interface StartupUpdateNotice {
+	/** 最新 tag（如 "b11177"） */
+	tag: string;
+	/** 最新构建号 */
+	build: number;
+	/** 发布日期（yyyy-MM-dd） */
+	date: string | null;
+	/** 本地构建号 */
+	local_build: number | null;
+	/** 后端拼好的中文对比说明（「当前 build X，最新 Y（日期）」），toast 直接显示 */
+	message: string;
+}
+
 export interface AppInfo {
 	/** 外壳自身版本（tauri.conf.json 的 version） */
 	app_version: string;
@@ -14,6 +28,8 @@ export interface AppInfo {
 	llama_installed_at: string | null;
 	/** 启动期自动更新是否开启（config.json 的 auto_update_llama_cpp） */
 	auto_update: boolean;
+	/** 启动期自动检查发现的新版本（无/未开启/没检查出为 null） */
+	startup_update: StartupUpdateNotice | null;
 	/** llama-server.exe 所在目录（bin/） */
 	bin_dir: string;
 	/** 更新备份所在目录（bin 同级，llamacpp_backup_<时间戳>/，最多 3 份） */

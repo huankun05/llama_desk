@@ -1171,3 +1171,24 @@ webui/manager_pkg/
   cargo test 0 错；svelte-check 0 错；probe_about 5/5 + settings 12/12；overlay v113。
 - ⚠️ **需用户重建 exe**（先确保旧 llama-desk.exe 已退出，否则 cargo 报 os error 5）后验证：
   About 行显示版本 / 检查更新给出 b1xxxx+日期 / 托盘退出后 8080/8090 无残留进程。
+
+**更新流程改「全程应用内」✅（9-25 晚，用户纠正语义：不要启动时系统通知）**：
+- 最终交互流：启动（开关开启）自动检查 → 发现新版**应用内** toast 弹出（含后端拼好的
+  中文版本对比「当前 build X，最新 Y（日期）」）→ 点「View update」跳设置→关于应用 →
+  确认「Download & install update」下载（进度横幅+系统通知）→ 完成后 toast 询问
+  「Restart now」→ 确认后重启应用，右下角系统通知「应用正在更新」。
+- Rust：删 `toast_update_available`/`GOTO_ABOUT_JS`（启动提示不再用系统通知+eval 跳转），
+  依赖去掉 tauri-winrt-notification；`startup_notice_json` 增加 `message` 字段
+  （动态插值走不了 overlay 词典 → 后端拼中文是既有通行做法）；新增 `app_restart_app`
+  命令（系统通知 → powershell 延迟 1.2s 拉起新 exe 错开 single-instance → exit(0)
+  触发 RunEvent::Exit 收拾服务）；build.rs commands + capability 同步
+  `allow-app-restart-app`（ACL 铁律）。
+- 前端：+layout.svelte 全局挂「更新提示」——挂载读 `app_info.startup_update` +
+  订阅 `app-update-available`，sessionStorage 标记保证一个应用会话只弹一次；
+  `gotoAboutFromNotice()` 复用 SettingsChat 的双通道跳转（展开 about 分区 + sessionStorage
+  标记 + 点真实侧栏链接 / 已在设置页则广播事件）；AboutTab 完成事件改 toast.success +
+  `Restart now` 按钮（15s）；横幅升级为版本对比 `build X → Y`。
+- ⚠️ 新命令 `app_restart_app` 也要在 build.rs `AppManifest.commands` 与 capability
+  permissions 里登记（本文档前面 ACL 三层校验教训的又一次应用）。
+- 验收：cargo test 8/8；cargo check 无代码警告；svelte-check 0/0；
+  probe_about 5/5 + settings 12/12；CJK 审计 0 处；dict 审计待补 0；overlay v114。
