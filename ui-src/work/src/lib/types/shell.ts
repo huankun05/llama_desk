@@ -64,3 +64,19 @@ export interface ShellUpdateEvent {
 	stage: 'running' | 'done' | 'error';
 	message: string;
 }
+
+/** app_check_shell_update 的结构化结果（check_shell_status 返回的 JSON）。 */
+export interface ShellCheckResult {
+	/** 是否完成检查（网络失败为 false，message 里给原因）；仓库尚无 release 也算 ok=true */
+	ok: boolean;
+	/** 供直接展示的消息（后端组装，含更新方式说明） */
+	message: string;
+	/** 编译进 exe 的当前版本（如 "1.0.0"） */
+	current_version: string;
+	/** 最新发布 tag（如 "v1.0.1"；仓库尚无 release 为 null） */
+	latest_tag: string | null;
+	/** 最新发布日期（yyyy-MM-dd） */
+	latest_date: string | null;
+	/** 是否已是最新（无 release 时为 true） */
+	up_to_date: boolean | null;
+}

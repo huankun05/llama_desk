@@ -11,7 +11,7 @@
 	import { SettingsGroup } from '$lib/components/app';
 	import { Button } from '$lib/components/ui/button';
 	import { Switch } from '$lib/components/ui/switch';
-	import { shellAvailable, getAppInfo, checkAppUpdate, updateNow, setAutoUpdate, openLogs, restartLlama, restartApp, onUpdateEvent, onUpdateAvailableEvent } from '$lib/services/shell.service';
+	import { shellAvailable, getAppInfo, checkAppUpdate, checkShellUpdate, updateNow, setAutoUpdate, openLogs, restartLlama, restartApp, onUpdateEvent, onUpdateAvailableEvent } from '$lib/services/shell.service';
 	import type { AppInfo } from '$lib/types';
 	import { onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
@@ -25,6 +25,10 @@
 	/** 检查更新结果（后端结构化返回；message 已含本地/最新版本与日期） */
 	let checkResult = $state('');
 	let checkOk = $state(true);
+	/** 应用壳（llama-desk 本体）更新检查：与 llama.cpp 更新是两条独立通道 */
+	let shellChecking = $state(false);
+	let shellCheckResult = $state('');
+	let shellCheckOk = $state(true);
 	/** 更新进行中：按钮禁用 + 横幅提示（更新跑在外壳的独立线程里） */
 	let updating = $state(false);
 	let updateMessage = $state('');
@@ -86,6 +90,21 @@
 			unlistenAvail?.();
 		};
 	});
+
+	async function onCheckShellUpdate() {
+		shellChecking = true;
+		shellCheckResult = '';
+		try {
+			const r = await checkShellUpdate();
+			shellCheckOk = r?.ok ?? false;
+			shellCheckResult = r?.message ?? '';
+		} catch (e) {
+			shellCheckOk = false;
+			shellCheckResult = e instanceof Error ? e.message : String(e);
+		} finally {
+			shellChecking = false;
+		}
+	}
 
 	async function onCheckUpdate() {
 		checking = true;
@@ -191,7 +210,43 @@
 			</div>
 		</SettingsGroup>
 
-		<SettingsGroup title="Updates">
+		<SettingsGroup title="App updates">
+			<div class="space-y-4" data-probe="about-shell-updates">
+				<div class="flex flex-wrap items-center gap-2">
+					<Button
+						onclick={onCheckShellUpdate}
+						variant="outline"
+						disabled={shellChecking || shellStale}
+					>
+						{#if shellChecking}
+							<LoaderCircle class="h-4 w-4 animate-spin" />
+						{:else}
+							<RefreshCw class="h-4 w-4" />
+						{/if}
+						Check for app updates
+					</Button>
+					<span class="font-mono text-sm text-muted-foreground">
+						v{info?.app_version || '—'}
+					</span>
+				</div>
+				{#if shellChecking || shellCheckResult}
+					<p
+						class="text-xs {shellCheckOk ? 'text-muted-foreground' : 'text-amber-700 dark:text-amber-300'}"
+						data-probe="about-shell-check-result"
+					>
+						{shellCheckResult || 'Checking…'}
+					</p>
+				{/if}
+				<p class="text-xs text-muted-foreground">
+					This app (the shell) and the llama.cpp engine below are updated through two separate
+					channels. Shell updates are published on the project's GitHub releases page: download
+					the new llama-desk.exe and replace the old file — your config, models, chat history and
+					backups all live outside the exe and are kept as-is. Restart the app after replacing.
+				</p>
+			</div>
+		</SettingsGroup>
+
+		<SettingsGroup title="llama.cpp updates">
 			<div class="space-y-4" data-probe="about-updates">
 				{#if info?.startup_update}
 					<!--

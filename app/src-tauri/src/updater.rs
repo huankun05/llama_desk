@@ -34,6 +34,9 @@ const FEED_URL: &str = "https://github.com/ggml-org/llama.cpp/releases.atom";
 const ASSETS_BASE: &str = "https://github.com/ggml-org/llama.cpp/releases/expanded_assets";
 /// 备路：官方 API（匿名限流 60 次/小时/IP，403 时主路已兜底）
 const API_LATEST: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
+/// 应用壳（llama-desk 本体）的发布馈源：与 llama.cpp 更新是**两条独立通道**，
+/// 前者更新外壳 exe，后者更新 bin/ 下的 llama.cpp 引擎，互不相干。
+const SHELL_FEED_URL: &str = "https://github.com/huankun05/llama_desk/releases.atom";
 
 /// PowerShell 脚本统一前缀：强制控制台 UTF-8 输出。
 /// 没有它，中文 Windows 的 GBK 输出被 `from_utf8_lossy` 解出一片 U+FFFD，
@@ -630,6 +633,112 @@ pub fn check_status(cfg: &AppConfig) -> serde_json::Value {
     v
 }
 
+/// 解析语义化版本号为 (major, minor, patch)，容忍前缀 v/V 与缺段（"v1.0.0" / "1.2"）。
+fn parse_ver(s: &str) -> Option<(u64, u64, u64)> {
+    let s = s.trim().trim_start_matches(|c| c == 'v' || c == 'V');
+    let mut it = s.split('.');
+    let major = it.next()?.trim().parse().ok()?;
+    let minor = it.next().unwrap_or("0").trim().parse().unwrap_or(0);
+    let patch = it.next().unwrap_or("0").trim().parse().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// 应用壳（llama-desk.exe 本体）的更新检查：查本仓库的 releases.atom，
+/// 与编译进 exe 的 CARGO_PKG_VERSION 做语义化版本对比。**只报告不自动下载** ——
+/// 外壳更新方式是去 releases 页下载新版 llama-desk.exe 替换旧文件，
+/// 配置/模型/备份都在 exe 之外，替换后原样保留。
+/// 仓库还没有任何 release 时 ok=true 且给出关注提示（不算错误）。
+pub fn check_shell_status() -> serde_json::Value {
+    let current = env!("CARGO_PKG_VERSION");
+    let mut v = serde_json::json!({
+        "ok": false,
+        "message": "",
+        "current_version": current,
+        "latest_tag": null,
+        "latest_date": null,
+        "up_to_date": null,
+    });
+    let handle = |v: &mut serde_json::Value, ok: bool, up: Option<bool>, tag: Option<String>, date: Option<String>, msg: String| {
+        v["ok"] = serde_json::json!(ok);
+        v["up_to_date"] = serde_json::json!(up);
+        v["latest_tag"] = serde_json::json!(tag);
+        v["latest_date"] = serde_json::json!(date);
+        v["message"] = serde_json::json!(msg);
+    };
+    match http_get(SHELL_FEED_URL) {
+        Ok(feed) => match feed.split("<entry>").nth(1) {
+            // atom 存在但没有任何 <entry>：仓库还没发过版本
+            None => handle(
+                &mut v,
+                true,
+                Some(true),
+                None,
+                None,
+                format!(
+                    "仓库还没有发布版本（当前 v{current}）。应用壳更新会发布在 \
+                     github.com/huankun05/llama_desk/releases：下载新版 llama-desk.exe \
+                     替换旧文件即可，配置、模型与备份都不受影响。"
+                ),
+            ),
+            Some(e) => {
+                let entry = e.split("</entry>").next().unwrap_or(e);
+                let tag = extract_between(entry, "releases/tag/", "\"").unwrap_or("").to_string();
+                let date = extract_between(entry, "<updated>", "<")
+                    .map(|s| s.chars().take(10).collect::<String>());
+                match parse_ver(&tag) {
+                    Some(latest) => {
+                        let cur = parse_ver(current).unwrap_or((0, 0, 0));
+                        let date_text = date.as_deref().unwrap_or("日期未知");
+                        if latest > cur {
+                            handle(
+                                &mut v,
+                                true,
+                                Some(false),
+                                Some(tag.clone()),
+                                date.clone(),
+                                format!(
+                                    "发现应用壳新版本：当前 v{current} → 最新 {tag}（{date_text}）。\
+                                     前往 github.com/huankun05/llama_desk/releases 下载新版 \
+                                     llama-desk.exe 替换旧文件，重启后即生效（配置、模型与备份不受影响）。"
+                                ),
+                            );
+                        } else {
+                            handle(
+                                &mut v,
+                                true,
+                                Some(true),
+                                Some(tag.clone()),
+                                date.clone(),
+                                format!("应用壳已是最新：当前 v{current}，最新发布 {tag}（{date_text}）"),
+                            );
+                        }
+                    }
+                    None => handle(
+                        &mut v,
+                        false,
+                        None,
+                        Some(tag.clone()),
+                        date,
+                        format!("发布 tag 不是版本号形式（{tag}），请到 releases 页面手动确认。"),
+                    ),
+                }
+            }
+        },
+        Err(e) => handle(
+            &mut v,
+            false,
+            None,
+            None,
+            None,
+            format!(
+                "检查应用壳更新失败：{e}。请确认本机能访问 github.com（必要时配置系统代理）后重试；\
+                 也可手动前往 github.com/huankun05/llama_desk/releases 查看。"
+            ),
+        ),
+    }
+    v
+}
+
 /// 手动更新：停掉本应用托管的实例 → 替换 → 重启；
 /// 若服务由外部进程占用则只替换二进制并提示手动重启。
 pub fn manual_update(cfg: &AppConfig, sup: &Supervisor) -> String {
@@ -715,6 +824,15 @@ mod tests {
         assert_eq!(civil_date(1_577_836_800), "2020-01-01");
         // 1970-01-01
         assert_eq!(civil_date(0), "1970-01-01");
+    }
+
+    #[test]
+    fn parse_ver_semver_tolerance() {
+        assert_eq!(parse_ver("v1.0.0"), Some((1, 0, 0)));
+        assert_eq!(parse_ver("1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_ver("V2.10"), Some((2, 10, 0)));
+        assert_eq!(parse_ver("1.2.3.4"), Some((1, 2, 3)));
+        assert_eq!(parse_ver("abc"), None);
     }
 
     #[test]

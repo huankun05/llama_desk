@@ -9,7 +9,13 @@
  * （{ stage: 'running' | 'done' | 'error', message }），onUpdateEvent 订阅它。
  */
 
-import type { AppInfo, ShellUpdateEvent, StartupUpdateNotice, UpdateCheckResult } from '$lib/types/shell';
+import type {
+	AppInfo,
+	ShellCheckResult,
+	ShellUpdateEvent,
+	StartupUpdateNotice,
+	UpdateCheckResult
+} from '$lib/types/shell';
 
 type TauriCore = typeof import('@tauri-apps/api/core');
 type TauriEvent = typeof import('@tauri-apps/api/event');
@@ -44,6 +50,17 @@ export async function checkAppUpdate(): Promise<UpdateCheckResult | null> {
 	const core = await tauriCore();
 	if (!core) return null;
 	return await core.invoke<UpdateCheckResult>('app_check_update');
+}
+
+/**
+ * 检查应用壳（llama-desk.exe 本体）更新：与 llama.cpp 更新是两条独立通道。
+ * 外壳更新方式 = GitHub releases 下载新 exe 替换（配置/模型/备份不受影响）。
+ * 浏览器模式返回 null。
+ */
+export async function checkShellUpdate(): Promise<ShellCheckResult | null> {
+	const core = await tauriCore();
+	if (!core) return null;
+	return await core.invoke<ShellCheckResult>('app_check_shell_update');
 }
 
 /**

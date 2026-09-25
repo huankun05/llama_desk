@@ -1192,3 +1192,22 @@ webui/manager_pkg/
   permissions 里登记（本文档前面 ACL 三层校验教训的又一次应用）。
 - 验收：cargo test 8/8；cargo check 无代码警告；svelte-check 0/0；
   probe_about 5/5 + settings 12/12；CJK 审计 0 处；dict 审计待补 0；overlay v114。
+
+**两种更新通道分离 ✅（9-25 晚，用户截图反馈：应用壳更新与 llama.cpp 更新要分开说明）**：
+- 语义：**应用壳（llama-desk.exe 本体）** 与 **llama.cpp 引擎（bin/）** 是两条独立更新通道
+  ——前者换外壳 exe，后者换 bin/ 下的引擎，互不相干。
+- Rust：updater 新增 `check_shell_status()` —— 查本仓库
+  `huankun05/llama_desk/releases.atom`（复用 atom 馈源机制，无 API 限流），tag 按语义化
+  版本（parse_ver，容忍 v 前缀/缺段）与编译期 `CARGO_PKG_VERSION` 对比；仓库还没有
+  release 时 ok=true 并给出「下载新 exe 替换旧文件，配置/模型/备份都在 exe 之外不受影响」
+  的说明；新命令 `app_check_shell_update`（build.rs + capability 同步 allow-*）。
+  **外壳更新刻意只报告不自动下载** —— 替换自身 exe 涉及自删自写，release 流程未建立前
+  手动替换最稳。
+- 前端：About 页拆成 **App updates（应用壳更新）** / **llama.cpp updates** 两个 SettingsGroup；
+  前者=检查按钮+当前版本号+双通道说明文字；后者=原有开关/检查/下载/横幅不动。
+- 词典：+App updates/llama.cpp updates/Check for app updates/长说明/build/installed；
+  删除已无使用处的独立词条 'Updates'。
+- 实测：llama_desk 的 releases.atom 可达且无 `<entry>`（仓库未发版），正确命中
+  「仓库还没有发布版本」分支。
+- 验收：cargo test 9/9（+parse_ver）；svelte-check 0/0；probe_about 5/5 + settings
+  12/12；CJK 0 处；dict 待补 0；overlay v116。

@@ -15,6 +15,7 @@
     "allow-ui-ready",
     "allow-app-info",
     "allow-app-check-update",
+    "allow-app-check-shell-update",
     "allow-app-update-now",
     "allow-app-set-auto-update",
     "allow-app-open-logs",

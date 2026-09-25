@@ -12,6 +12,7 @@ fn main() {
             "ui_ready",
             "app_info",
             "app_check_update",
+            "app_check_shell_update",
             "app_update_now",
             "app_set_auto_update",
             "app_open_logs",

@@ -159,6 +159,15 @@ async fn app_check_update(app: AppHandle) -> Result<serde_json::Value, String> {
         .map_err(|e| format!("检查更新失败：{e}"))
 }
 
+/// 应用壳（llama-desk.exe 本体）更新检查：与 llama.cpp 更新是两条独立通道
+/// （前者换外壳 exe，后者换 bin/ 下的引擎）。只报告不下载。
+#[tauri::command]
+async fn app_check_shell_update() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(updater::check_shell_status)
+        .await
+        .map_err(|e| format!("检查应用壳更新失败：{e}"))
+}
+
 /// 立即更新：独立线程跑（下载+解压可能几分钟），进度经事件+系统通知回报，UI 不阻塞。
 #[tauri::command]
 async fn app_update_now(app: AppHandle) -> Result<String, String> {
@@ -378,6 +387,7 @@ fn main() {
             ui_ready,
             app_info,
             app_check_update,
+            app_check_shell_update,
             app_update_now,
             app_set_auto_update,
             app_open_logs,
