@@ -928,6 +928,18 @@ webui/manager_pkg/
 >   `download 28/28` + `nav 16/16` + `settings 12/12` + `launch_merge 35/35` 全绿。
 > - **可复现**：切分脚本留在 `tools/_oneoff/split_manager_pkg.py`（改边界重跑，不手改生成文件）。
 
+> **第 4 批·③ 模型标签/收藏/备注 + 回收站删除（9-25）**：
+> - **后端** `webui/manager_pkg/meta.py`（新建）：`model_meta` 持久化到 `webui/model_meta.json`（原子写 `.tmp→os.replace`）；标签去重+限长 32/单标签 64、备注限长 2000、收藏开关；置空整条则删键。
+>   删除守卫 `model_delete_check`：`not_found / outside_allowed_root / ollama_mirror / hardlink / loaded / ok` 五档（只允许 `models/` 树下、非 `from-ollama` 硬链接镜像、非硬链接、未被实例加载）；
+>   `model_delete` 走 Windows 回收站（`SHFileOperationW` + `FOF_ALLOWUNDO`），**绝不 `os.remove`**，失败降级移入 `models/.trash`。
+>   端点：`GET/POST /api/model-meta`、`GET /api/model-delete-check`、`POST /api/model-delete`；`__main__` 启动即 `_load_meta()`。
+> - **前端** `DialogModelInformation.svelte` 新增 Manage 分节（收藏★ / 标签 chip 增删 / 备注 textarea / 删除三态：默认→校验通过显示确认+回收站提示+方案软警告→校验失败显示 `Cannot delete: <reason>`）；`manager.service.ts` 新增 4 接口；`overlay.js` 补全中文词条（CJK 审计 0、dict 审计 0）。
+>   启动方案软引用计数（`launchPresetsStore` 只在前端，`manager` 后端看不见 → 只能软警告）。
+> - **测试** `tests/` 增至 33（新增 `TestModelMeta` 4 例 + `TestModelDeleteCheck` 4 例），全绿。
+> - **踩坑**：`deploy.ps1` 的 `$KEEP` 名单漏了 `manager_pkg` → 每次部署把整个后端包删掉，manager 起不来（`ModuleNotFoundError`）。已把 `manager_pkg` 加进 `$KEEP` 修复。
+> - **验收**：真机起 manager（:8090）→ `GET/POST model-meta` 回显、`model-delete-check` 守卫（含 `from-ollama` 真文件被拦 `ollama_mirror`）、`model-delete` 真正进回收站且模型从 `/api/models` 消失；前端静态烟测挂载+从 :8090 拉到 18 个模型+零 JS 异常。`tools/ui/probe_model_meta.mjs` 留作对话框深验（需已加载模型，沙箱无 GPU 运行时，真机跑）。
+> - **提交**：`c32bb75`（已推 `origin/main`）。
+
 ### 第 3 批（2 天 · 可观测性）
 9. **F GPU 健康 / 归因面板**
 10. **E 一键基准 + 留档**（轻量档先上，严格档后补）
@@ -936,8 +948,8 @@ webui/manager_pkg/
 
 ### 第 4 批（按需 · 结构与差异化）
 11. **H2 拆 `manager.py` 包** ✅ 已完成（9-25，见上方收尾记录）
-12. **G 量化工具箱**（perplexity 对比是重点）
-13. 模型标签 / 备注 / 收藏 / **删除**（破坏性，见问题 7）
+12. **G 量化工具箱**（perplexity 对比是重点）—— 经评估**暂不推**：你不自量化、下载器已解决"装不装得下"、perplexity 一年用两三次，性价比低
+13. **模型标签 / 备注 / 收藏 / 回收站删除** ✅ 已完成（9-25，见下方收尾记录；对应问题 7 的「②谨慎版」）
 
 ---
 
