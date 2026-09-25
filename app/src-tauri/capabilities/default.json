@@ -11,6 +11,13 @@
   },
   "permissions": [
     "core:default",
-    "notification:default"
+    "notification:default",
+    "allow-ui-ready",
+    "allow-app-info",
+    "allow-app-check-update",
+    "allow-app-update-now",
+    "allow-app-set-auto-update",
+    "allow-app-open-logs",
+    "allow-app-restart-llama"
   ]
 }
