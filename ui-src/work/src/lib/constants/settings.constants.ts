@@ -39,7 +39,7 @@ export const SETTINGS_SECTIONS = {
 	PERFORMANCE: { slug: 'performance', title: 'Performance' },
 	SAMPLING_PENALTIES: { slug: 'sampling-penalties', title: 'Sampling & Penalties' },
 	TOOLS: { slug: 'tools', title: 'Tools' },
-	BACKUP: { slug: 'backup', title: '备份管理' }
+	BACKUP: { slug: 'backup', title: 'Backup' }
 } as const;
 
 export const SETTINGS_SECTION_SLUGS = {
@@ -396,10 +396,37 @@ export const SETTINGS_REGISTRY: SettingsSectionEntry[] = [
 		slug: SETTINGS_SECTION_SLUGS.IMPORT_EXPORT,
 		title: SETTINGS_SECTION_TITLES.IMPORT_EXPORT
 	},
-	// Backup management (custom tab)
+	// Backup management (custom tab; fields are non-UI metadata read by the tab itself)
 	{
 		icon: HardDrive,
-		settings: [],
+		settings: [
+			{
+				defaultValue: false,
+				help: 'Automatically create a full backup (presets, settings and conversations) to the chosen backup folder on a fixed interval.',
+				key: SETTINGS_KEYS.AUTO_BACKUP_ENABLED,
+				label: 'Auto backup enabled',
+				standaloneField: false,
+				type: SettingsFieldType.CHECKBOX
+			},
+			{
+				defaultValue: 24,
+				help: 'Minimum hours between automatic backups. Checked at startup and every 30 minutes while the app is open.',
+				isPositiveInteger: true,
+				key: SETTINGS_KEYS.AUTO_BACKUP_INTERVAL_HOURS,
+				label: 'Auto backup interval (hours)',
+				standaloneField: false,
+				type: SettingsFieldType.INPUT
+			},
+			{
+				defaultValue: 7,
+				help: 'How many automatic backups to keep. Oldest ones are deleted after each successful auto backup. Manual backups are never touched.',
+				isPositiveInteger: true,
+				key: SETTINGS_KEYS.AUTO_BACKUP_KEEP_COUNT,
+				label: 'Auto backups to keep',
+				standaloneField: false,
+				type: SettingsFieldType.INPUT
+			}
+		],
 		slug: SETTINGS_SECTION_SLUGS.BACKUP,
 		title: SETTINGS_SECTION_TITLES.BACKUP
 	},

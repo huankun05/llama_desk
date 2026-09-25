@@ -1762,6 +1762,12 @@
 						<span class="rounded-full bg-red-500/15 px-2 py-0.5 text-xs text-red-600"
 							>Throttled</span
 						>
+					{:else if gpuHist.verdict.level === 'unknown'}
+						<!-- 无 NVIDIA 显卡 / 采样器未跑起来都落在这里：给「无数据」而不是「空闲」，
+						     避免没装显卡的用户误以为机器在空转。 -->
+						<span class="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+							>No data</span
+						>
 					{:else}
 						<span class="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
 							>Idle</span

@@ -221,9 +221,24 @@ export async function listBackups(): Promise<BackupMeta[]> {
 	return out.sort((a, b) => b.created_at - a.created_at);
 }
 
-export async function createBackup(bundle: BackupBundle): Promise<BackupMeta> {
-	const handle = await getBackupDirHandle(true);
-	if (!handle) throw new Error('未选择备份文件夹或权限被拒绝');
+/**
+ * Create a backup file in the chosen backup folder.
+ *
+ * interactive=true (default): when no usable folder handle is persisted yet,
+ * the system directory picker opens — that is the manual "Create backup" flow.
+ * interactive=false: never opens any picker; returns null when the folder is
+ * missing or its permission has lapsed (the automatic backup must stay silent
+ * and simply wait for the next chance).
+ */
+export async function createBackup(
+	bundle: BackupBundle,
+	opts: { interactive?: boolean } = {}
+): Promise<BackupMeta | null> {
+	const handle = await getBackupDirHandle(opts.interactive !== false);
+	if (!handle) {
+		if (opts.interactive === false) return null;
+		throw new Error('未选择备份文件夹或权限被拒绝');
+	}
 	bundle.version = BACKUP_VERSION;
 	const filename = filenameFor(bundle.name, bundle.created_at);
 	const fileHandle = await handle.getFileHandle(filename, { create: true });
@@ -244,13 +259,21 @@ export async function readBackup(filename: string): Promise<BackupBundle> {
 	return JSON.parse(await file.text()) as BackupBundle;
 }
 
-export async function deleteBackup(filename: string): Promise<void> {
-	const handle = await getBackupDirHandle(true);
-	if (!handle) throw new Error('未选择备份文件夹或权限被拒绝');
+export async function deleteBackup(
+	filename: string,
+	opts: { interactive?: boolean } = {}
+): Promise<boolean> {
+	const handle = await getBackupDirHandle(opts.interactive !== false);
+	if (!handle) {
+		if (opts.interactive === false) return false;
+		throw new Error('未选择备份文件夹或权限被拒绝');
+	}
 	try {
 		await handle.removeEntry(filename);
+		return true;
 	} catch {
 		// 文件可能已不存在
+		return false;
 	}
 }
 

@@ -25,6 +25,12 @@
 		type BackupBundle,
 		type BackupMeta
 	} from '$lib/services/backupService';
+	import {
+		AUTO_BACKUP_NAME,
+		MIN_INTERVAL_HOURS,
+		MIN_KEEP_COUNT
+	} from '$lib/services/autoBackupService';
+	import { SETTINGS_KEYS } from '$lib/constants';
 	import { conversationsStore, launchPresetsStore, settingsStore } from '$lib/stores';
 	import { fade } from 'svelte/transition';
 	import { toast } from 'svelte-sonner';
@@ -32,6 +38,36 @@
 	let backups = $state<BackupMeta[]>([]);
 	let loading = $state(false);
 	let dirReady = $state(false);
+
+	// ---- 自动备份设置（读写 settingsStore，随备份包一起导出/恢复）----
+	let autoEnabled = $state(false);
+	let autoInterval = $state(24);
+	let autoKeep = $state(7);
+	let latestAutoAt = $state(0);
+
+	function loadAutoSettings() {
+		autoEnabled = settingsStore.getConfig(SETTINGS_KEYS.AUTO_BACKUP_ENABLED) === true;
+		autoInterval = Math.max(
+			MIN_INTERVAL_HOURS,
+			Math.floor(Number(settingsStore.getConfig(SETTINGS_KEYS.AUTO_BACKUP_INTERVAL_HOURS)) || 24)
+		);
+		autoKeep = Math.max(
+			MIN_KEEP_COUNT,
+			Math.floor(Number(settingsStore.getConfig(SETTINGS_KEYS.AUTO_BACKUP_KEEP_COUNT)) || 7)
+		);
+	}
+
+	function saveAutoSettings() {
+		settingsStore.updateConfig(SETTINGS_KEYS.AUTO_BACKUP_ENABLED, autoEnabled);
+		settingsStore.updateConfig(
+			SETTINGS_KEYS.AUTO_BACKUP_INTERVAL_HOURS,
+			Math.max(MIN_INTERVAL_HOURS, Math.floor(autoInterval) || 24)
+		);
+		settingsStore.updateConfig(
+			SETTINGS_KEYS.AUTO_BACKUP_KEEP_COUNT,
+			Math.max(MIN_KEEP_COUNT, Math.floor(autoKeep) || 7)
+		);
+	}
 
 	// 是否支持 File System Access API（Chromium / WebView2，且为安全上下文）。
 	const diskMode = supportsFSA();
@@ -56,12 +92,14 @@
 		loading = true;
 		backups = await listBackups();
 		loading = false;
+		latestAutoAt = backups.find((b) => b.name === AUTO_BACKUP_NAME)?.created_at ?? 0;
 	}
 
 	async function init() {
 		if (!diskMode) return;
 		const handle = await getBackupDirHandle(false);
 		dirReady = !!handle;
+		loadAutoSettings();
 		if (dirReady) await load();
 	}
 
@@ -226,6 +264,71 @@
 			and manageable in this list. The choice is remembered, so you only authorize once.
 		</div>
 	{/if}
+
+	<SettingsGroup title="Auto backup">
+		<div class="space-y-4" data-probe="auto-backup-group">
+			<div class="flex flex-wrap items-center justify-between gap-2">
+				<div>
+					<div class="text-sm font-medium" data-probe="auto-backup-title">Enable auto backup</div>
+					<p class="text-xs text-muted-foreground">
+						Automatically save a full backup (presets, settings and conversations) to the backup
+						folder above. Checked at startup and every 30 minutes; a new file is written only when
+						the interval has elapsed. Oldest automatic backups are pruned; manual backups are never
+						touched.
+					</p>
+				</div>
+				<Checkbox
+					bind:checked={autoEnabled}
+					onCheckedChange={(checked) => {
+						autoEnabled = Boolean(checked);
+						saveAutoSettings();
+					}}
+				/>
+			</div>
+
+			{#if autoEnabled}
+				<div class="flex flex-wrap items-end gap-4">
+					<label class="flex flex-col gap-1 text-sm">
+						<span>Interval (hours)</span>
+						<Input
+							type="number"
+							class="w-28"
+							bind:value={autoInterval}
+							min={MIN_INTERVAL_HOURS}
+							onchange={() => saveAutoSettings()}
+							data-probe="auto-backup-interval"
+						/>
+					</label>
+					<label class="flex flex-col gap-1 text-sm">
+						<span>Keep count</span>
+						<Input
+							type="number"
+							class="w-28"
+							bind:value={autoKeep}
+							min={MIN_KEEP_COUNT}
+							onchange={() => saveAutoSettings()}
+							data-probe="auto-backup-keep"
+						/>
+					</label>
+				</div>
+			{/if}
+
+			<p class="text-xs text-muted-foreground" data-probe="auto-backup-status">
+				{#if !diskMode}
+					Automatic backups need a Chromium-based desktop build.
+				{:else if !dirReady}
+					Choose a backup folder first — auto backup stays off until then.
+				{:else if autoEnabled && latestAutoAt}
+					<span>Last automatic backup:</span>
+					{formatDate(latestAutoAt)}
+				{:else if autoEnabled}
+					No automatic backup yet — the first one runs shortly.
+				{:else}
+					Auto backup is off.
+				{/if}
+			</p>
+		</div>
+	</SettingsGroup>
 
 	<SettingsGroup title="Local backup">
 		<div class="space-y-4">

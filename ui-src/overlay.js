@@ -1296,6 +1296,7 @@
     // 2026-09-23：该组件原本**整页写死中文**，是 static 审计
     // （tools/diag/audit_hardcoded_cjk.mjs，308 个 .svelte 里唯一一个）报出来的漏翻文件 ——
     // 中文用户看不出问题，英文模式下整页都是中文。现改为「英文源码 + 本表提供中文」。
+    'Backup': '备份管理',
     'Local backup': '本地备份',
     'Create backup': '创建备份',
     'Choose backup folder': '选择备份文件夹',
@@ -1320,6 +1321,17 @@
     '(or any folder you like) — every backup is written straight there and manageable in this list. The choice is remembered, so you only authorize once.': '（或任意你喜欢的目录），之后所有备份将直接写入该目录、可在此列表里管理。选择一次后会被记住，无需重复授权。',
     // 确认对话框：描述里带插值（备份名 / 文件名），拆成静态分片走 DialogConfirmation 的 descriptionSnippet。
     'Restore this backup?': '恢复此备份？',
+    // ---------- 设置页「自动备份」（2026-09-25 新增） ----------
+    'Auto backup': '自动备份',
+    'Enable auto backup': '启用自动备份',
+    'Automatically save a full backup (presets, settings and conversations) to the backup folder above. Checked at startup and every 30 minutes; a new file is written only when the interval has elapsed. Oldest automatic backups are pruned; manual backups are never touched.': '自动把完整备份（启动方案、设置与对话历史）保存到上方选定的备份文件夹。应用启动时和每 30 分钟检查一次，到达间隔才写入新文件；超出保留数量的旧自动备份会被清理，手动创建的备份永不触碰。',
+    'Interval (hours)': '间隔（小时）',
+    'Keep count': '保留份数',
+    'Last automatic backup:': '上次自动备份：',
+    'No automatic backup yet — the first one runs shortly.': '还没有自动备份——第一份很快生成。',
+    'Auto backup is off.': '自动备份未启用。',
+    'Automatic backups need a Chromium-based desktop build.': '自动备份需要基于 Chromium 的桌面版。',
+    'Choose a backup folder first — auto backup stays off until then.': '请先选择备份文件夹——在此之前自动备份不会运行。',
     'Restore from “': '将用「',
     '”: launch presets are merged by name (same name overwritten, ones created after the backup kept), settings imported as a whole': '」恢复：启动方案按名称合并去重（同名的覆盖、备份后新建的保留）、设置整体导入',
     ', conversations merged by id (existing ones overwritten, new ones appended)': '、对话历史按 id 合并（已存在的覆盖、新的追加）',

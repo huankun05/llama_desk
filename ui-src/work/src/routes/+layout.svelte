@@ -32,6 +32,7 @@
 		versionStore
 	} from '$lib/stores';
 	import { initStores } from '$lib/stores/init';
+	import { maybeAutoBackup } from '$lib/services/autoBackupService';
 	import { ModeWatcher } from 'mode-watcher';
 	import { untrack } from 'svelte';
 	import { onMount } from 'svelte';
@@ -187,7 +188,17 @@
 		// so the user sees each conv that has a live inference, even ones not opened yet
 		void chatStore.syncRemoteRunningStreams();
 
-		return watchManagerEvents();
+		// 自动备份调度：启动后 20s 先查一次（避开首屏），之后每 30min 检查。
+		// 是否真的写备份由设置里的间隔节流，这里只负责"按时来看一眼"。
+		const autoBackupTimer = window.setInterval(() => void maybeAutoBackup(), 30 * 60 * 1000);
+		const autoBackupKick = window.setTimeout(() => void maybeAutoBackup(), 20_000);
+		const watchManagerEventsCleanup = watchManagerEvents();
+
+		return () => {
+			watchManagerEventsCleanup?.();
+			window.clearInterval(autoBackupTimer);
+			window.clearTimeout(autoBackupKick);
+		};
 	});
 
 	/**
