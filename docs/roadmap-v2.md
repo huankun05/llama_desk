@@ -1132,3 +1132,18 @@ webui/manager_pkg/
   probe_settings_page 12/12、probe_nav 16/16 回归全绿；svelte-check 0 错；部署 `overlay.js?v=110`。
 - ⚠️ **需用户重建外壳**：`cd app/src-tauri && cargo build --release`（或 app\build.bat），
   重建后真机验证：设置 → 关于应用 → 检查更新/开关/系统通知。
+
+**版本号正式化 + 旧外壳提示 ✅（9-25 晚，用户截图反馈「没有版本号 / 托盘还是旧的」）**：
+- **根因**：两个现象同一个根因——用户的 exe 是 9-22 编译的旧版（本日 16:42 的外壳改动
+  都没编进去）：旧 exe 无 `app_info` 命令 → 设置页 IPC 失败显示悬空的「v…」；托盘自然
+  还是旧 8 项。**修复本身已存在，缺的只是重建。**
+- **版本正式定为 1.0.0**（tauri.conf.json + Cargo.toml，后续打包以此为准）。
+- **AboutTab 增强**：新增 `shellStale` 状态——桌面外壳存在但 `app_info` invoke 失败
+  （=旧 exe）时，琥珀色提示条明确指引重建命令（`cd app\src-tauri && cargo build --release`），
+  版本行显示「—」不再悬空；更新/重启/日志按钮在旧外壳下全部禁用；「启动时检查更新」
+  从裸 Checkbox 换成 **Switch** 开关（更醒目）。
+- **托盘 tooltip 带版本**：`llama-desk v1.0.0 — llama.cpp 本地服务`（悬停即见版本）。
+- dict_audit 白名单加重建命令文本；DICT +4 词条（重建提示/更新横幅/重启提示）。
+- 验收：cargo check 0 错 0 警；probe_about_tab 5/5、probe_settings_page 12/12；
+  svelte-check 0 错；部署 `overlay.js?v=111`。
+- ⚠️ **仍需用户重建 exe** 后真机验证：版本号显示 v1.0.0 / Switch 开关生效 / 托盘变 3 项 / tooltip 带版本。

@@ -7,10 +7,10 @@
 	 * 浏览器模式（browser_fallback / 托盘「在浏览器中打开」）没有 Tauri IPC，
 	 * 只显示说明文字 —— 所有控件仅在桌面外壳下可用。
 	 */
-	import { FolderOpen, LoaderCircle, RefreshCw, RotateCcw } from '@lucide/svelte';
+	import { FolderOpen, LoaderCircle, RefreshCw, RotateCcw, TriangleAlert } from '@lucide/svelte';
 	import { SettingsGroup } from '$lib/components/app';
 	import { Button } from '$lib/components/ui/button';
-	import { Checkbox } from '$lib/components/ui/checkbox';
+	import { Switch } from '$lib/components/ui/switch';
 	import { shellAvailable, getAppInfo, checkAppUpdate, updateNow, setAutoUpdate, openLogs, restartLlama, onUpdateEvent } from '$lib/services/shell.service';
 	import type { AppInfo } from '$lib/types';
 	import { onMount } from 'svelte';
@@ -19,6 +19,8 @@
 	const inShell = shellAvailable();
 
 	let info = $state<AppInfo | null>(null);
+	/** 桌面外壳存在但 app_info 调用失败 → 用户跑的是重建前的旧 exe（IPC 命令还没编进去）。 */
+	let shellStale = $state(false);
 	let checking = $state(false);
 	let checkResult = $state('');
 	/** 更新进行中：按钮禁用 + 横幅提示（更新跑在外壳的独立线程里） */
@@ -28,10 +30,15 @@
 
 	onMount(() => {
 		if (!inShell) return;
-		void getAppInfo().then((v) => {
-			info = v;
-			autoEnabled = v?.auto_update ?? false;
-		});
+		void getAppInfo()
+			.then((v) => {
+				info = v;
+				autoEnabled = v?.auto_update ?? false;
+			})
+			.catch(() => {
+				// invoke 'app_info' 不存在 → 外壳是改动前编译的旧 exe，提示重建
+				shellStale = true;
+			});
 		// 更新在外壳的线程里跑（窗口最小化到托盘也继续），进度经事件+系统通知回报
 		let disposed = false;
 		let unlisten: (() => void) | null = null;
@@ -114,16 +121,29 @@
 			auto-update, restart the local service or open the log folder.
 		</div>
 	{:else}
+		{#if shellStale}
+			<div
+				class="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300"
+				data-probe="about-shell-stale"
+			>
+				<TriangleAlert class="mt-0.5 h-4 w-4 shrink-0" />
+				<span>
+					The running llama-desk.exe was built before this interface existed. Rebuild the shell
+					(<span class="font-mono">cd app\src-tauri &amp;&amp; cargo build --release</span>) to see
+					version numbers, update controls and the simplified tray.
+				</span>
+			</div>
+		{/if}
 		<SettingsGroup title="App info">
 			<div class="space-y-3 text-sm" data-probe="about-info">
 				<div class="flex items-center justify-between gap-2">
 					<span class="text-muted-foreground">llama-desk (this app)</span>
-					<span class="font-mono">v{info?.app_version ?? '…'}</span>
+					<span class="font-mono">{info?.app_version ? `v${info.app_version}` : '—'}</span>
 				</div>
 				<div class="flex items-center justify-between gap-2">
 					<span class="text-muted-foreground">llama.cpp</span>
 					<span class="font-mono">
-						{info == null ? '…' : info.llama_build == null ? 'build unknown' : `build ${info.llama_build}`}
+						{info == null ? '—' : info.llama_build == null ? 'build unknown' : `build ${info.llama_build}`}
 					</span>
 				</div>
 				<p class="text-xs text-muted-foreground">
@@ -145,14 +165,15 @@
 							before launching the service.
 						</p>
 					</div>
-					<Checkbox
+					<Switch
 						bind:checked={autoEnabled}
 						onCheckedChange={(checked) => void onToggleAuto(Boolean(checked))}
+						disabled={shellStale}
 					/>
 				</div>
 
 				<div class="flex flex-wrap items-center gap-2">
-					<Button onclick={onCheckUpdate} variant="outline" disabled={checking || updating}>
+					<Button onclick={onCheckUpdate} variant="outline" disabled={checking || updating || shellStale}>
 						{#if checking}
 							<LoaderCircle class="h-4 w-4 animate-spin" />
 						{:else}
@@ -160,7 +181,7 @@
 						{/if}
 						Check for updates
 					</Button>
-					<Button onclick={onUpdateNow} variant="outline" disabled={checking || updating}>
+					<Button onclick={onUpdateNow} variant="outline" disabled={checking || updating || shellStale}>
 						Download & install update
 					</Button>
 				</div>
@@ -185,11 +206,11 @@
 
 		<SettingsGroup title="Service & logs">
 			<div class="flex flex-wrap items-center gap-2">
-				<Button onclick={onRestart} variant="outline">
+				<Button onclick={onRestart} variant="outline" disabled={shellStale}>
 					<RotateCcw class="h-4 w-4" />
 					Restart local service
 				</Button>
-				<Button onclick={() => void openLogs()} variant="outline">
+				<Button onclick={() => void openLogs()} variant="outline" disabled={shellStale}>
 					<FolderOpen class="h-4 w-4" />
 					Open log folder
 				</Button>

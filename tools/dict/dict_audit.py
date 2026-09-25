@@ -154,6 +154,8 @@ ALLOW = {
     # 「关于应用」分区：产品名与版本前缀（v0.1.0 的前导 v）不翻
     'llama-desk.exe',
     'v',
+    # 命令行示例：跨语言保留原文（About 页「重建外壳」提示里的重建命令）
+    'cd app\\src-tauri && cargo build --release',
 }
 
 allf = []

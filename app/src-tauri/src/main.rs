@@ -573,7 +573,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&i_show, &i_browser, &i_quit])?;
 
     let mut builder = TrayIconBuilder::new()
-        .tooltip("llama.cpp 本地服务")
+        .tooltip(format!("llama-desk v{} — llama.cpp 本地服务", env!("CARGO_PKG_VERSION")))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {

@@ -1,6 +1,6 @@
 [package]
 name = "llama-desk"
-version = "0.1.0"
+version = "1.0.0"
 description = "llama.cpp desktop shell — process supervisor + tray for the local llama-server WebUI"
 authors = ["lihuankun"]
 edition = "2021"
