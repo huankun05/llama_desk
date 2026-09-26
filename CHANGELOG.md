@@ -8,6 +8,10 @@
 
 ## [Unreleased]
 
+### 功能（计划随下个版本发布）
+
+- **Hugging Face 源自动切换**：manager 启动时探测 `huggingface.co` 连通性，连不通（国内网络 / 代理抽风）自动改用 `hf-mirror.com` 镜像，无需手动设 `HF_API_BASE`；仍可用该环境变量强制指定任意源（最高优先级）。当前生效源通过 `GET /api/env-check` 的 `hf_source` 字段暴露，前端可展示。
+
 ### 工程
 
 - 仓库瘦身：GitHub 只保留打包所需源码（`app/`、`webui/`、`ui-src/`）与 `README.md` / `LICENSE` / `CHANGELOG.md`；

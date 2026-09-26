@@ -13,9 +13,47 @@ from .scan import _do_scan   # 下载完成后重新扫描收录新模型（scan
 import ssl
 import urllib.error
 
-HF_BASE = (os.environ.get("HF_API_BASE") or "https://huggingface.co").rstrip("/")
-HF_API = HF_BASE + "/api"
 HF_HEADERS = {"User-Agent": "llama-desk/1.0"}
+
+
+def _hf_probe_base(timeout=5):
+    """自动选源（国内网络优化）。
+
+    优先级：
+      1. 环境变量 `HF_API_BASE`（用户手动指定，最高优先，例如 hf-mirror.com）；
+      2. 连通性探测：默认 huggingface.co 能通就用官方；连不通（被墙/代理抽风）
+         就切到 hf-mirror.com 镜像；
+      3. 两路都探测失败 → 仍回退到官方源（让后续下载正常报网络错，而不是导入即崩）。
+
+    任何异常都不外抛（选源本身是在「网络可能不对」时跑的）。
+    """
+    explicit = os.environ.get("HF_API_BASE")
+    if explicit:
+        u = explicit.rstrip("/")
+        return u, "env(%s)" % u
+    candidates = [
+        ("https://huggingface.co", "huggingface.co（官方）"),
+        ("https://hf-mirror.com", "hf-mirror.com（镜像）"),
+    ]
+    for url, label in candidates:
+        try:
+            req = urllib.request.Request(
+                url + "/api/models?limit=1", headers=HF_HEADERS)
+            urllib.request.urlopen(
+                req, timeout=timeout,
+                context=ssl._create_unverified_context()).close()
+            return url, label
+        except Exception:
+            continue
+    return "https://huggingface.co", "huggingface.co（官方，未探测到连通性）"
+
+
+# 模块加载即定源（一次/进程）。HF_API_BASE 环境变量或自动探测结果。
+_HF_BASE_CHOICE = _hf_probe_base()
+HF_BASE = _HF_BASE_CHOICE[0]
+HF_SOURCE_LABEL = _HF_BASE_CHOICE[1]
+HF_API = HF_BASE + "/api"
+print("[hf] 使用模型源: %s (%s)" % (HF_BASE, HF_SOURCE_LABEL))
 HF_JOBS = {}                       # job_id -> dict（线程安全的任务表）
 HF_JOBS_LOCK = threading.Lock()
 

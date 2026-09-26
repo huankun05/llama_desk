@@ -11,6 +11,11 @@ import shutil
 
 from .state import LLAMA_SERVER, MODEL_DIRS, WEBUI_DIR
 
+try:
+    from .downloads import HF_BASE, HF_SOURCE_LABEL
+except Exception:  # noqa: BLE001 —— 自检绝不抛
+    HF_BASE, HF_SOURCE_LABEL = "https://huggingface.co", "unknown"
+
 
 def _check_llama_server():
     """llama-server.exe 是否存在。这是唯一致命项：没有它连推理都起不来。"""
@@ -58,4 +63,5 @@ def env_check():
         "llama_server": llama,
         "models": models,
         "gpu": gpu,
+        "hf_source": {"base": HF_BASE, "label": HF_SOURCE_LABEL},
     }

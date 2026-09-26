@@ -132,8 +132,9 @@ IMMUTABLE_PREFIXES = ("/_app/immutable/", "/static/")
 #    urllib 在重定向时**默认不**把 Range 带到重定向请求上 —— 这里手动捕获 Location
 #    并重发带 Range 的请求（实测 get 206 + 仅返回尾部），兼容所有 Python 版本。
 # ============================================================
-# HF 主站被墙/抽风时可设环境变量切镜像（如 HF_API_BASE=https://hf-mirror.com，
-# 镜像是完整反代，API 与 resolve 路径同构）。默认走官方。
+# HF 源：manager 启动时自动探测连通性——默认 huggingface.co，连不通（被墙/代理抽风）
+# 自动切 hf-mirror.com 镜像（完整反代，API 与 resolve 路径同构）。仍可用环境变量
+# HF_API_BASE 手动强制指定任意源（最高优先级）。当前生效源见 GET /api/env-check 的 hf_source。
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"   # 开 keep-alive，见上面注释
