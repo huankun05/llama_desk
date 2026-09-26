@@ -107,3 +107,18 @@ desktop.ini
 # ── ⑬ 运行时状态（manager 生成，非源码）──────────────────────
 /webui/model_meta.json
 /webui/models/.trash/
+
+# ── ⑭ 开发辅助脚本 / 测试 / 现场截图（本地保留，不进仓库）────
+#     入库原则：只进「应用本身 + 文档」。下面这些本地留着用，但 GitHub 不要。
+/tools/
+/tests/
+/shots/
+/ui-src/work/tests/
+/ui-src/work/.storybook/
+/ui-src/work/playwright.config.ts
+/ui-src/work/vitest.shims.d.ts
+/ui-src/work/vitest-setup-client.ts
+*.spec.ts
+
+# ── ⑮ 开发者内部笔记（本地保留，不进仓库）──────────────────
+/DEV-NOTES.md
