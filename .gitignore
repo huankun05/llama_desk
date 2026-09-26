@@ -109,7 +109,8 @@ desktop.ini
 /webui/models/.trash/
 
 # ── ⑭ 开发辅助脚本 / 测试 / 现场截图（本地保留，不进仓库）────
-#     入库原则：只进「应用本身 + 文档」。下面这些本地留着用，但 GitHub 不要。
+#     入库原则：只进「打包所需源码 + README / LICENSE / CHANGELOG」。
+#     下面这些本地留着用，但 GitHub 不要。
 /tools/
 /tests/
 /shots/
@@ -122,3 +123,8 @@ desktop.ini
 
 # ── ⑮ 开发者内部笔记（本地保留，不进仓库）──────────────────
 /DEV-NOTES.md
+
+# ── ⑯ 开发文档 / 手工启动脚本 / 个人模型配置（本地保留，不进仓库）──
+/docs/
+/start-*.bat
+/Modelfile-*
